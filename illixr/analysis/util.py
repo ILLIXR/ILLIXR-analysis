@@ -6,6 +6,7 @@ Ideally, every ILLIXR-specific function calls ILLIXR-independent
 functions with ILLIXR-specific information."""
 
 import sqlite3
+import subprocess
 from pathlib import Path
 from typing import List, Optional
 
@@ -80,4 +81,12 @@ def pd_read_sqlite_table(
         .sort_values(index_cols)
         .set_index(index_cols, verify_integrity=verify)
         .sort_index()
+    )
+
+
+def command_exists(command: str) -> bool:
+    """Test if `command` is found on the path."""
+    return (
+        subprocess.run(["which", command], check=False, capture_output=True).returncode
+        == 0
     )

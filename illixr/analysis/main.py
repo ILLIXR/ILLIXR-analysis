@@ -13,6 +13,7 @@ import typer
 
 from .analyze_trials import analyze_trials
 from .read_trials import read_trials
+from .util import command_exists
 
 app = typer.Typer()
 
@@ -53,6 +54,10 @@ def check(
             "autoflake",
             "--recursive",
             "--in-place" if modify else "--check",
+            "--recursive",
+            "--expand-star-imports",
+            "--remove-all-unused-imports",
+            "--ignore-init-module-imports",
             "--verbose" if verbose else "",
             source,
         ],
@@ -89,38 +94,41 @@ def check(
             "--jobs=0",
             package,
         ],
+        (
+            ["scc", "--by-file", "--wide", "--no-cocomo", source]
+            if command_exists("scc")
+            else []
+        ),
     ]
 
     all_success = True
-    for command in commands:
+    for command in filter(bool, commands):
         command = list(filter(bool, command))
+        typer.secho(f"$ {shlex.join(map(str, command))}", bold=True)
         proc = subprocess.run(
             command,
             capture_output=True,
             check=False,
         )
-        return_code = (
+        success = (
             proc.returncode
             if command[0] != "pylint"
             else proc.returncode & ~pylint_codes["acceptable"]
-        )
-        success = return_code == 0
+        ) == 0
         all_success = all_success and success
-        command_str = "$ " + shlex.join(map(str, command))
-        typer.secho(
-            command_str,
-            fg=typer.colors.GREEN if success else typer.colors.RED,
-        )
+        typer.echo("\U00002705" if success else "\U0000274C")
 
         # typer.echo(repr(proc.stdout))
-        typer.echo(proc.stdout, color=True, nl=False, file=sys.stdout)
         typer.echo(proc.stderr, color=True, nl=False, file=sys.stderr)
+        typer.echo(proc.stdout, color=True, nl=False, file=sys.stdout)
+        # if not proc.stdout.endswith(b"\n\n"):
+        typer.echo("\n")
 
     if all_success:
         typer.echo("Your code is excellent and ready to commit! \U0001F3C6")
     else:
         typer.echo("You're probably busy building an awesome feature.")
-        typer.echo("Be sure to fix these problems before comitting.")
+        typer.echo("Be sure to fix these problems before comitting. \U0001F44D")
         raise typer.Exit(code=1)
 
 

@@ -50,17 +50,22 @@ For everyday usage, you can use `poetry run ...` for one-off commands,
 or `poetry shell` for an interactive shell with the right `$PATH` and
 `$PYTHONPATH`.
 
+To run the code,
+```
+$ typer illixr.analysis.main run
+```
+
 Before comitting, run the linter and autoformatter. Make sure there is no red text in the following command:
 
 ```
 $ typer illixr.analysis.main run check [--no-modify] [--verbose]
-# This will modify your code in place, but only non-semantic chagnes
-# --no-in-place turns that off.
+# This will modify your code!
 ```
 
-To run the code,
+I recommend making this a git commit-hook.
+
 ```
-$ typer illixr.analysis.main run
+$ ln -s ../../pre-commit.sh .git/hooks/pre-commit
 ```
 
 ## Guiding principles

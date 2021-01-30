@@ -1,0 +1,37 @@
+on: [push]
+jobs:
+  build:
+    name: Run checks
+    runs-on: ubuntu-latest
+    steps:
+
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v2
+
+      - uses: actions/setup-python@v2
+        with:
+          python-version: 3.8
+
+      - uses: snok/install-poetry@v1.1.1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      # Caching the venv means that unless the pyproject.toml changed, install is a noop
+      # However, we don't want to cache installing the actual project, which could change.
+      - name: Load cache
+        id: cached-poetry-dependencies
+        uses: actions/cache@v2
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
+
+      # Install the actual project.
+      # This will take care of whatever is not in the cache.
+      - name: Install project
+        run: poetry install --no-interaction
+
+      - name: Run checks
+        run: |
+          cd "${GITHUB_WORKSPACE}"
+          poetry run typer illixr.analysis.main run check --no-modify

@@ -50,17 +50,17 @@ For everyday usage, you can use `poetry run ...` for one-off commands,
 or `poetry shell` for an interactive shell with the right `$PATH` and
 `$PYTHONPATH`.
 
-To run checks,
+Before comitting, run the linter and autoformatter. Make sure there is no red text in the following command:
 
 ```
-$ typer illixr.analysis.check run [--no-in-place] [--verbose]
-# This will modify your code in place, but only stylistic changes and unused variables
+$ typer illixr.analysis.main run check [--no-modify] [--verbose]
+# This will modify your code in place, but only non-semantic chagnes
 # --no-in-place turns that off.
 ```
 
 To run the code,
 ```
-$ typer illixr.analysis run
+$ typer illixr.analysis.main run
 ```
 
 ## Guiding principles

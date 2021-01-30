@@ -1,3 +1,12 @@
+"""Functions which are **independent** of ILLIXR.
+
+It is suitable for importing into another project.
+
+Ideally, every ILLIXR-specific function calls ILLIXR-independent
+functions with ILLIXR-specific information."""
+
+import sqlite3
+from pathlib import Path
 from typing import List, Optional
 
 import pandas as pd  # type: ignore
@@ -9,6 +18,13 @@ def normalize_cats(
     columns: Optional[List[str]] = None,
     include_indices: bool = True,
 ) -> List[pd.DataFrame]:
+    """Normalize the categorical columns to the same dtype.
+
+    dfs should be a list of dataframes with the same columns.
+
+    Primarily useful before pd.concat(...)
+
+    """
     if not dfs:
         return dfs
 
@@ -49,3 +65,19 @@ def normalize_cats(
         ]
 
     return dfs
+
+
+def pd_read_sqlite_table(
+    database: Path,
+    table: str,
+    index_cols: List[str],
+    verify: bool = False,
+) -> pd.DataFrame:
+    """Reads a whole table from a sqlite3 database."""
+    conn = sqlite3.connect(str(database))
+    return (
+        pd.read_sql_query(f"SELECT * FROM {table};", conn)
+        .sort_values(index_cols)
+        .set_index(index_cols, verify_integrity=verify)
+        .sort_index()
+    )

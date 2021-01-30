@@ -1,32 +1,26 @@
-import sqlite3
+"""Functions which load data from ILLIXR dumps.
+
+
+They should **not** depend on ILLIXR's DAG or configuration. If that
+is necessary to read, take the DAG-specific information as an
+argument.
+
+"""
+
 from pathlib import Path
-from typing import Iterable, List
+from typing import Callable, Iterable, Mapping
 
 import pandas as pd  # type: ignore
 
 from .call_forest import CallForest
 from .types import Trial, Trials
-from .util import normalize_cats
-
-
-def read_sqlite(
-    database: Path,
-    table: str,
-    index_cols: List[str],
-    verify: bool = False,
-) -> pd.DataFrame:
-    conn = sqlite3.connect(str(database))
-    return (
-        pd.read_sql_query(f"SELECT * FROM {table};", conn)
-        .sort_values(index_cols)
-        .set_index(index_cols, verify_integrity=verify)
-        .sort_index()
-    )
+from .util import normalize_cats, pd_read_sqlite_table
 
 
 def read_frames(database: Path, verify: bool = False) -> pd.DataFrame:
-    strings = read_sqlite(database, "strings", ["address"], verify)
-    frames = read_sqlite(database, "finished", ["tid", "id"], verify)
+    """Reads the cpu_timer data."""
+    strings = pd_read_sqlite_table(database, "strings", ["address"], verify)
+    frames = pd_read_sqlite_table(database, "finished", ["tid", "id"], verify)
 
     return (
         frames.join(strings, on="function_name", how="left")
@@ -40,7 +34,12 @@ def read_frames(database: Path, verify: bool = False) -> pd.DataFrame:
     )
 
 
-def read_trial(path: Path, verify: bool = False) -> Trial:
+def read_trial(
+    path: Path,
+    info_readers: Mapping[str, Callable[[pd.DataFrame], pd.DataFrame]],
+    verify: bool = False,
+) -> Trial:
+    """Reads all data from the dump of a single ILLIXR trial."""
     return Trial(
         call_forest=CallForest(
             pd.concat(
@@ -54,6 +53,7 @@ def read_trial(path: Path, verify: bool = False) -> Trial:
     )
 
 
-def read_trials(paths: Iterable[Path]) -> Trials:
-    trials = [read_trial(path) for path in paths]
-    return Trials(trials=trials)
+def read_trials(paths: Iterable[Path], verify: bool = False) -> Trials:
+    """Reads all data from the a set of ILLIXR trials."""
+    trials = [read_trial(path, {}, verify) for path in paths]
+    return Trials(each=trials)

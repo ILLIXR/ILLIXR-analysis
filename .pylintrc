@@ -61,8 +61,6 @@ confidence=
 # no Warning level messages displayed, use "--disable=all --enable=classes
 # --disable=W".
 disable=
-    missing-docstring,
-
 	# This is needed to make mypy types work (such as OrderedDict[K, V])
     unsubscriptable-object,
 

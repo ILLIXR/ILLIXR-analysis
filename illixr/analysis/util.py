@@ -5,13 +5,14 @@ It is suitable for importing into another project.
 Ideally, every ILLIXR-specific function calls ILLIXR-independent
 functions with ILLIXR-specific information."""
 
+import itertools
 import sqlite3
 import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterable, List, Optional, TypeVar
 
-import pandas as pd  # type: ignore
-from pandas.api.types import union_categoricals  # type: ignore
+import pandas as pd
+from pandas.api.types import union_categoricals
 
 
 def normalize_cats(
@@ -32,7 +33,7 @@ def normalize_cats(
     if columns is None:
         if include_indices:
             # peel of indices into columns so that I can mutate them
-            indices = [df.index.names for df in dfs]
+            indices = [df.index for df in dfs]
             dfs = [df.reset_index() for df in dfs]
         columns2 = [
             column
@@ -78,9 +79,9 @@ def pd_read_sqlite_table(
     conn = sqlite3.connect(str(database))
     return (
         pd.read_sql_query(f"SELECT * FROM {table};", conn)
-        .sort_values(index_cols)
+        .sort_values(index_cols, inplace=False)
         .set_index(index_cols, verify_integrity=verify)
-        .sort_index()
+        .sort_index(inplace=False)
     )
 
 
@@ -90,3 +91,11 @@ def command_exists(command: str) -> bool:
         subprocess.run(["which", command], check=False, capture_output=True).returncode
         == 0
     )
+
+
+T = TypeVar("T")
+
+
+def flatten(its: Iterable[Iterable[T]]) -> Iterable[T]:
+    """Flatten an iterable of iterable of T to just iterable of T"""
+    return itertools.chain.from_iterable(its)

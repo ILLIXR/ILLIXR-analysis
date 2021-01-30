@@ -100,6 +100,23 @@ optional = false
 python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*, !=3.4.*"
 
 [[package]]
+name = "data-science-types"
+version = "0.3.0.dev1"
+description = "Type stubs for Python machine learning libraries"
+category = "dev"
+optional = false
+python-versions = ">=3.6"
+develop = true
+
+[package.extras]
+dev = ["black", "flake8", "flake8-pyi", "matplotlib", "mypy (0.770)", "numpy", "pandas", "pytest"]
+
+[package.source]
+url = "data-science-types"
+reference = ""
+type = "directory"
+
+[[package]]
 name = "decorator"
 version = "4.4.2"
 description = "Decorators for Humans"
@@ -496,7 +513,7 @@ testing = ["pytest (>=3.5,<3.7.3 || >3.7.3)", "pytest-checkdocs (>=1.2.3)", "pyt
 [metadata]
 lock-version = "1.0"
 python-versions = "^3.8"
-content-hash = "7f9fc0e442d56d46759fcc6f004f909b9f15c66308ed1c6fd468336a17f449a4"
+content-hash = "6f1a3f839fd267e882ec5a7b410a2ade6638c25700fed2f4e68dc6ca92ed4ed3"
 
 [metadata.files]
 appdirs = [
@@ -533,6 +550,7 @@ colorama = [
     {file = "colorama-0.4.4-py2.py3-none-any.whl", hash = "sha256:9f47eda37229f68eee03b24b9748937c7dc3868f906e8ba69fbcbdd3bc5dc3e2"},
     {file = "colorama-0.4.4.tar.gz", hash = "sha256:5941b2b48a20143d2267e95b1c2a7603ce057ee39fd88e7329b0c292aa16869b"},
 ]
+data-science-types = []
 decorator = [
     {file = "decorator-4.4.2-py2.py3-none-any.whl", hash = "sha256:41fa54c2a0cc4ba648be4fd43cff00aedf5b9465c9bf18d64325bc225f08f760"},
     {file = "decorator-4.4.2.tar.gz", hash = "sha256:e3a62f0520172440ca0dcc823749319382e377f37f140a0b99ef45fecb84bfe7"},

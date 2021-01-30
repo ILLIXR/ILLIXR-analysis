@@ -64,6 +64,10 @@ disable=
 	# This is needed to make mypy types work (such as OrderedDict[K, V])
     unsubscriptable-object,
 
+	# We have black, so I won't worry about line length here.
+	# Only string lines that black can't shorten remain.
+	line-too-long,
+
     # my personal style is to explicitly else-return and else-raise.
     # that way, if you change the return or raise, same functionality
     no-else-raise,

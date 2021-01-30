@@ -118,17 +118,21 @@ def check(
         all_success = all_success and success
         typer.echo("\U00002705" if success else "\U0000274C")
 
-        # typer.echo(repr(proc.stdout))
         typer.echo(proc.stderr, color=True, nl=False, file=sys.stderr)
         typer.echo(proc.stdout, color=True, nl=False, file=sys.stdout)
         # if not proc.stdout.endswith(b"\n\n"):
         typer.echo("\n")
 
     if all_success:
-        typer.echo("Your code is excellent and ready to commit! \U0001F3C6")
+        typer.secho(
+            "Your code is excellent and ready to commit!", fg=typer.colors.GREEN
+        )
     else:
-        typer.echo("You're probably busy building an awesome feature.")
-        typer.echo("Be sure to fix these problems before comitting. \U0001F44D")
+        typer.secho(
+            "You're probably busy building an awesome feature.\n"
+            "Be sure to fix these problems before comitting.",
+            fg=typer.colors.YELLOW,
+        )
         raise typer.Exit(code=1)
 
 

@@ -19,10 +19,10 @@ def check(in_place: bool = True, verbose: bool = False) -> None:
 
     commands: List[List[Union[Path, str]]] = [
         ["autoflake", "--recursive", "--in-place" if in_place else "--check", source],
-        ["isort", *([] if in_place else ["--check"]), source],
+        ["isort", *([] if in_place else ["--check"]), "--color", source],
         [
             "black",
-            "--quiet",
+            "--color",
             "--target-version",
             "py38",
             *([] if in_place else ["--check"]),
@@ -35,10 +35,11 @@ def check(in_place: bool = True, verbose: bool = False) -> None:
             "--",
             *(["--verbose"] if verbose else []),
             "--namespace-packages",
+            "--color-output",
             "--package",
             package,
         ],
-        # ["pylint", *("--verbose" if verbose else []), source],
+        # ["pylint", *("--verbose" if verbose else []), "--output-format=colorized", source],
     ]
 
     stdout_bytes = os.fdopen(sys.stdout.fileno(), "wb")

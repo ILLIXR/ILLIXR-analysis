@@ -6,7 +6,18 @@ import collections
 import contextlib
 import sqlite3
 from pathlib import Path
-from typing import Dict, Iterable, Mapping, Optional, Tuple, Type, TypeVar, Union, cast
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    Mapping,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+    cast,
+)
 
 import anytree  # type: ignore
 import attr
@@ -23,31 +34,31 @@ class DataIntegrityWarning(Warning):
 class StaticFrame(anytree.NodeMixin):  # type: ignore
     """A dynamic stack frame."""
 
-    _function_name: str
+    function_name: str
     _plugin_id: int
-    _topic_name: Optional[str]
+    _topic_name: str
 
     def __str__(self) -> str:
         """Human-readable string representation"""
         ret = f"{self.function_name}"
-        if self.plugin_id:
-            ret += f", plugin {self.plugin_id}"
-        if self.topic_name:
-            ret += f", topic {self.topic_name}"
+        if self.function_name == "":
+            ret += "thread"
+        if self._plugin_id:
+            ret += f"\nplugin {self._plugin_id}"
+        # if self._topic_name:
+        #     ret += f", on {self._topic_name}"
         return ret
 
     def __init__(
         self,
-        function_name: str,
-        plugin_id: int,
-        topic_name: str,
+        row: pandas.Series[Any],
         parent: Optional[StaticFrame] = None,
         children: Optional[Iterable[StaticFrame]] = None,
     ) -> None:
         """Constructs a StaticFrame. See anytree.NodeMixin for parent and children."""
-        self._function_name = function_name
-        self._plugin_id = plugin_id
-        self._topic_name = topic_name
+        self.function_name = cast(str, row["function_name"])
+        self._plugin_id = cast(int, row["plugin_id"])
+        self._topic_name = cast(str, row["topic_name"])
         self.parent = parent
         if children:
             self.children = children
@@ -58,6 +69,7 @@ class DynamicFrame(anytree.NodeMixin):  # type: ignore
 
     thread_id: int
     _frame_id: int
+    cpu_time: int
     static_frame: StaticFrame
 
     def __str__(self) -> str:
@@ -66,15 +78,16 @@ class DynamicFrame(anytree.NodeMixin):  # type: ignore
 
     def __init__(
         self,
-        thread_id: int,
-        frame_id: int,
+        index: Tuple[int, int],
+        row: pandas.Series[Any],
         static_frame: StaticFrame,
         parent: Optional[DynamicFrame] = None,
         children: Optional[Iterable[DynamicFrame]] = None,
     ) -> None:
         """Constructs a DynamicFrame. See anytree.NodeMixin for parent and children."""
-        self.thread_id = thread_id
-        self._frame_id = frame_id
+        self.thread_id = index[0]
+        self._frame_id = index[1]
+        self.cpu_time = row["cpu_stop"] - row["cpu_start"]
         self.static_frame = static_frame
         self.parent = parent
         if children:
@@ -124,34 +137,37 @@ class CallTree:
                 # Omitting "file_name"
             )
 
-        if not (frames["epoch"] == 0).all():
+        if verify and not (frames["epoch"] == 0).all():
             raise RuntimeError(
                 "Frames come from different epochs;" "They need to be merged."
             )
 
-        if frames.index.levels[0].nunique() != 1:
+        if verify and frames.index.levels[0].nunique() != 1:
             raise RuntimeError("Frames come from different threads")
         else:
             thread_id = frames.index.levels[0][0]
 
         # Don't create duplicates of the dynamic and static frame
-        frame_to_parent: Dict[Tuple[int, int], DynamicFrame] = {}
+        index_to_frame: Dict[Tuple[int, int], DynamicFrame] = {}
         frame_to_static_children: Dict[
             Union[DynamicFrame, None], Dict[Tuple[str, int, str], StaticFrame]
         ] = collections.defaultdict(dict)
-        for (thread_id, frame_id), row in tqdm(
+        for index, row in tqdm(
             frames.iterrows(),
             total=len(frames),
             desc=f"Reconstrucing stack {thread_id}",
             unit="frame",
         ):
             # Get parent as DynamicFrame or None
-            parent = frame_to_parent.get((thread_id, frame_id), None)
+            assert (not verify) or row["caller"] == 0 or row["caller"] < index[1]
+            parent = index_to_frame.get((index[0], row["caller"]), None)
 
             # Get StaticFrame, reusing if already exists.
             # However, it must already exist _at the same point in the stack._
             # static_children is all of the StaticFrames that exist at this point in the stack
-            static_children = frame_to_static_children[parent]
+            static_children = frame_to_static_children[
+                parent.static_frame if parent is not None else None
+            ]
             static_info = cast(
                 Tuple[str, int, str],
                 tuple(row[["function_name", "plugin_id", "topic_name"]]),
@@ -159,18 +175,18 @@ class CallTree:
             if static_info not in static_children:
                 # Not exists; create
                 static_children[static_info] = StaticFrame(
-                    *static_info, parent=parent.static_frame if parent else None
+                    row, parent=parent.static_frame if parent else None
                 )
             static_frame = static_children[static_info]
 
-            frame = DynamicFrame(thread_id, frame_id, static_frame, parent=parent)
+            frame = DynamicFrame(index, row, static_frame, parent=parent)
 
-            # Update the frame_to_parent so its children can find it.
-            frame_to_parent[(thread_id, frame_id)] = frame
+            # Update the index_to_frame so its children can find it.
+            index_to_frame[index] = frame
 
         return cls(
             thread_id=thread_id,
-            root=frame_to_parent[(thread_id, 0)],
+            root=index_to_frame[(thread_id, 0)],
         )
 
     @classmethod

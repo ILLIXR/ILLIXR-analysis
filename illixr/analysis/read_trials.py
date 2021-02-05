@@ -10,10 +10,15 @@ argument.
 from pathlib import Path
 from typing import Iterable
 
+import charmonium.cache as ch_cache
+
 from .call_tree import CallTree
 from .types import Trial, Trials
 
+CACHE_PATH = Path(".cache")
 
+
+@ch_cache.decor(ch_cache.FileStore.create(CACHE_PATH))
 def read_trial(
     metrics: Path,
     verify: bool = False,
@@ -26,6 +31,7 @@ def read_trial(
 
     return Trial(
         call_trees=CallTree.from_metrics_dir(metrics, verify),
+        output_dir=metrics,
     )
 
 

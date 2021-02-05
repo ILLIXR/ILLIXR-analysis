@@ -19,9 +19,14 @@ app = typer.Typer()
 
 # See https://clig.dev/ for guidelines
 @app.command()
-def main(data_dir: Path) -> None:
+def main(
+    data_dir: Path,
+    verify: bool = typer.Option(
+        False, "--verify", help="Preform extra checks on the data"
+    ),
+) -> None:
     """Runs every analysis on every trial."""
-    trials = read_trials([data_dir])
+    trials = read_trials([data_dir], verify)
     analyze_trials(trials)
 
 

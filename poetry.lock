@@ -99,6 +99,14 @@ typed-ast = ">=1.4.0"
 typing-extensions = ">=3.7.4"
 
 [[package]]
+name = "charmonium.cache"
+version = "0.6.0"
+description = "Provides a decorator for caching a function and an equivalent command-line util."
+category = "main"
+optional = false
+python-versions = ">=3.6,<4.0"
+
+[[package]]
 name = "click"
 version = "7.1.2"
 description = "Composable command line interface toolkit"
@@ -370,6 +378,14 @@ optional = false
 python-versions = ">=3.5"
 
 [[package]]
+name = "pygraphviz"
+version = "1.7"
+description = "Python interface to Graphviz"
+category = "main"
+optional = false
+python-versions = ">=3.7"
+
+[[package]]
 name = "pylint"
 version = "2.6.0"
 description = "python code static checker"
@@ -547,7 +563,7 @@ testing = ["pytest (>=3.5,<3.7.3 || >3.7.3)", "pytest-checkdocs (>=1.2.3)", "pyt
 [metadata]
 lock-version = "1.0"
 python-versions = "^3.8"
-content-hash = "bc9c755884418a2ec76e999cfdf9e5b5cc5303d69ff8ffe6c5118444e0472f4e"
+content-hash = "288fc20c0f7ba8a473ceed7e60b29299a418604010f19014ed404249bdad04e7"
 
 [metadata.files]
 anytree = [
@@ -579,6 +595,10 @@ backcall = [
 ]
 black = [
     {file = "black-20.8b1.tar.gz", hash = "sha256:1c02557aa099101b9d21496f8a914e9ed2222ef70336404eeeac8edba836fbea"},
+]
+"charmonium.cache" = [
+    {file = "charmonium.cache-0.6.0-py3-none-any.whl", hash = "sha256:a55f30873dc009545444213577d357d01d392860c3d8b48e491e0a72b1c71c25"},
+    {file = "charmonium.cache-0.6.0.tar.gz", hash = "sha256:f07ac0b1e6d3b759ba01dee3549a7fe01cb1f6bd4ceb6cddc203abc8cdf022a1"},
 ]
 click = [
     {file = "click-7.1.2-py2.py3-none-any.whl", hash = "sha256:dacca89f4bfadd5de3d7489b7c8a566eee0d3676333fbb50030263894c38c0dc"},
@@ -757,6 +777,9 @@ pyflakes = [
 pygments = [
     {file = "Pygments-2.7.4-py3-none-any.whl", hash = "sha256:bc9591213a8f0e0ca1a5e68a479b4887fdc3e75d0774e5c71c31920c427de435"},
     {file = "Pygments-2.7.4.tar.gz", hash = "sha256:df49d09b498e83c1a73128295860250b0b7edd4c723a32e9bc0d295c7c2ec337"},
+]
+pygraphviz = [
+    {file = "pygraphviz-1.7.zip", hash = "sha256:a7bec6609f37cf1e64898c59f075afd659106cf9356c5f387cecaa2e0cdb2304"},
 ]
 pylint = [
     {file = "pylint-2.6.0-py3-none-any.whl", hash = "sha256:bfe68f020f8a0fece830a22dd4d5dddb4ecc6137db04face4c3420a46a52239f"},

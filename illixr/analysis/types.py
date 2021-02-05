@@ -1,5 +1,6 @@
 """Types that will be needed in multiple modules."""
 
+from pathlib import Path
 from typing import List, Mapping
 
 import attr
@@ -12,6 +13,7 @@ class Trial:
     """A single trial of ILLIXR."""
 
     call_trees: Mapping[int, CallTree] = attr.ib()
+    output_dir: Path
 
 
 @attr.frozen

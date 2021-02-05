@@ -6,7 +6,7 @@ This repo contains scripts that analyze the data produced by ILLIXR.
 
 ```
 # Clone the code
-$ git clone git@github.com:ILLIXR/ILLIXR-analysis.git
+$ git clone --recursive git@github.com:ILLIXR/ILLIXR-analysis.git
 $ cd ILLIXR-analysis
 
 # Check Python version
@@ -52,13 +52,15 @@ or `poetry shell` for an interactive shell with the right `$PATH` and
 
 To run the code,
 ```
-$ typer illixr.analysis.main run
+$ poetry shell
+$ python -m illixr.analysis.main run
 ```
 
 Before comitting, run the linter and autoformatter. Make sure there is no red text in the following command:
 
 ```
-$ typer illixr.analysis.main run check [--no-modify] [--verbose]
+$ poetry shell
+$ python -m illixr.analysis.main check [--no-modify] [--verbose]
 # This will modify your code!
 ```
 
@@ -78,5 +80,7 @@ $ ln -s ../../pre-commit.sh .git/hooks/pre-commit
 - Use static types. Data processing is long enough that bugs might not cause faults until ten minutes in. Static typing helps us fail earlier.
 
 - Don't commit data to this repo. I tried that once; Since git stores a whole branching history of eventually-obsolete data, it made cloning the repo take as long as draining an ocean.
+
+- Issue warnings when the data is sketchy.
 
 [pyenv]: https://github.com/pyenv/pyenv/

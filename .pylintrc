@@ -64,6 +64,21 @@ disable=
 	# This is needed to make mypy types work (such as OrderedDict[K, V])
     unsubscriptable-object,
 
+	# We have black, so I won't worry about this
+	line-too-long,
+
+    # We have isort, so don't worry about this
+    wrong-import-position,
+
+    # We have mypy, so don't worry about this
+    no-member,
+	not-callable,
+	undefined-variable,
+
+    # We use classes like structs, so many will have no public methods.
+    # I actually want to encourage fewer methods.
+	too-few-public-methods,
+
     # my personal style is to explicitly else-return and else-raise.
     # that way, if you change the return or raise, same functionality
     no-else-raise,

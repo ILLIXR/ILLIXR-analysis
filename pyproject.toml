@@ -17,6 +17,9 @@ typer = {extras = ["all"], version = "^0.3.2"}
 typer-cli = "^0.0.11"
 pandas = "^1.2.1"
 attrs = "^20.3.0"
+networkx = "^2.5"
+anytree = "^2.8.0"
+tqdm = "^4.56.0"
 
 [tool.poetry.dev-dependencies]
 autoflake = "^1.4"

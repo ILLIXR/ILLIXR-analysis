@@ -1,17 +1,17 @@
 """Types that will be needed in multiple modules."""
 
-from typing import List
+from typing import List, Mapping
 
 import attr
 
-from .call_forest import CallForest
+from .call_tree import CallTree
 
 
 @attr.frozen
 class Trial:
     """A single trial of ILLIXR."""
 
-    call_forest: CallForest = attr.ib()
+    call_trees: Mapping[int, CallTree] = attr.ib()
 
 
 @attr.frozen

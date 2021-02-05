@@ -5,13 +5,14 @@ It is suitable for importing into another project.
 Ideally, every ILLIXR-specific function calls ILLIXR-independent
 functions with ILLIXR-specific information."""
 
-import sqlite3
+import abc
+import itertools
 import subprocess
-from pathlib import Path
-from typing import List, Optional
+from typing import Any, Callable, Iterable, List, Optional, TypeVar
 
 import pandas as pd  # type: ignore
 from pandas.api.types import union_categoricals  # type: ignore
+from typing_extensions import Protocol
 
 
 def normalize_cats(
@@ -32,7 +33,7 @@ def normalize_cats(
     if columns is None:
         if include_indices:
             # peel of indices into columns so that I can mutate them
-            indices = [df.index.names for df in dfs]
+            indices = [df.index for df in dfs]
             dfs = [df.reset_index() for df in dfs]
         columns2 = [
             column
@@ -68,25 +69,119 @@ def normalize_cats(
     return dfs
 
 
-def pd_read_sqlite_table(
-    database: Path,
-    table: str,
-    index_cols: List[str],
-    verify: bool = False,
-) -> pd.DataFrame:
-    """Reads a whole table from a sqlite3 database."""
-    conn = sqlite3.connect(str(database))
-    return (
-        pd.read_sql_query(f"SELECT * FROM {table};", conn)
-        .sort_values(index_cols)
-        .set_index(index_cols, verify_integrity=verify)
-        .sort_index()
-    )
-
-
 def command_exists(command: str) -> bool:
     """Test if `command` is found on the path."""
     return (
         subprocess.run(["which", command], check=False, capture_output=True).returncode
         == 0
+    )
+
+
+_T = TypeVar("_T")
+
+
+def flatten(its: Iterable[Iterable[_T]]) -> Iterable[_T]:
+    """Flatten an iterable of iterables to just iterable"""
+    return itertools.chain.from_iterable(its)
+
+
+def compose_all(fns: Iterable[Callable[[_T], _T]]) -> Callable[[_T], _T]:
+    def ret(elem: _T) -> _T:
+        for fn in fns:
+            elem = fn(elem)
+        return elem
+
+    return ret
+
+
+_C = TypeVar("_C", bound="Comparable")
+
+
+class Comparable(Protocol):
+    """Analog of java.lang.Comparable"""
+
+    # pylint: disable=missing-function-docstring
+
+    @abc.abstractmethod
+    def __eq__(self, other: Any) -> bool:
+        ...
+
+    @abc.abstractmethod
+    def __lt__(self: _C, other: _C) -> bool:
+        ...
+
+    @abc.abstractmethod
+    def __gt__(self: _C, other: _C) -> bool:
+        ...
+
+    @abc.abstractmethod
+    def __le__(self: _C, other: _C) -> bool:
+        ...
+
+    @abc.abstractmethod
+    def __ge__(self: _C, other: _C) -> bool:
+        ...
+
+
+def clip(elem: _C, lower: _C, upper: _C) -> _C:
+    """Returns an element between lower and upper.
+
+    Analog of numpy.clip for scalars.
+
+    """
+    if elem <= lower:
+        return lower
+    elif elem >= upper:
+        return upper
+    else:
+        return elem
+
+
+def sort_and_set_index(
+    df: pd.DataFrame, columns: List[str], verify_integrity: bool = False
+) -> pd.DataFrame:
+    """Sets columns as a uniuqe, sorted index.
+
+    Can use with df.pipe
+
+    """
+    return (
+        df.sort_values(columns, inplace=False)
+        .set_index(columns, verify_integrity=verify_integrity)
+        .sort_index(inplace=False)
+    )
+
+
+def to_categories(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+    """Converts columns of df to categories.
+
+    Can use with df.pipe.
+
+    """
+    return df.assign(**{column: df[column].astype("category") for column in columns})
+
+
+def set_index_with_uniquifier(
+    df: pd.DataFrame, columns: List[str], uniquifier_column: str
+) -> pd.DataFrame:
+    """Genreates uniqueifier_column and sets columns + [uniquifier_column] as a unique, sorted index.
+
+    Can use with df.pipe.
+
+    """
+    return (
+        df.sort_values(columns, kind="mergesort")
+        .set_index(columns)
+        .assign(**{uniquifier_column: 0})
+        .assign(
+            **{
+                uniquifier_column: lambda df: (
+                    df[uniquifier_column]
+                    .groupby(by=range(len(columns)))
+                    .transform(lambda series: range(len(series)))
+                )
+            }
+        )
+        .set_index(uniquifier_column, append=True)
+        .sort_index(inplace=False)
     )

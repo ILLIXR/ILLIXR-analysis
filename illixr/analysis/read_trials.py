@@ -8,18 +8,14 @@ argument.
 """
 
 from pathlib import Path
-from typing import Callable, Iterable, Mapping
+from typing import Iterable
 
-import pandas as pd
-
-from .call_forest import CallForest
+from .call_tree import CallTree
 from .types import Trial, Trials
 
 
 def read_trial(
     metrics: Path,
-    info_cols: Mapping[str, object],
-    info_readers: Mapping[str, Callable[[pd.DataFrame], pd.DataFrame]],
     verify: bool = False,
 ) -> Trial:
     """Reads all data from the dump of a single ILLIXR trial.
@@ -29,7 +25,7 @@ def read_trial(
     """
 
     return Trial(
-        call_forest=CallForest.from_dir(metrics, info_cols, info_readers, verify),
+        call_trees=CallTree.from_metrics_dir(metrics, verify),
     )
 
 
@@ -39,5 +35,5 @@ def read_trials(paths: Iterable[Path], verify: bool = False) -> Trials:
     This should only contain high-level function-calls.
 
     """
-    trials = [read_trial(path, {}, {}, verify) for path in paths]
+    trials = [read_trial(path, verify) for path in paths]
     return Trials(each=trials)

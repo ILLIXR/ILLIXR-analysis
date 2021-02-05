@@ -52,13 +52,15 @@ or `poetry shell` for an interactive shell with the right `$PATH` and
 
 To run the code,
 ```
-$ typer illixr.analysis.main run
+$ poetry shell
+$ python -m illixr.analysis.main run
 ```
 
 Before comitting, run the linter and autoformatter. Make sure there is no red text in the following command:
 
 ```
-$ typer illixr.analysis.main run check [--no-modify] [--verbose]
+$ poetry shell
+$ python -m illixr.analysis.main check [--no-modify] [--verbose]
 # This will modify your code!
 ```
 

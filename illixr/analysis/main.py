@@ -66,6 +66,13 @@ def check(
             "" if modify else "--check",
             "--color",
             "--verbose" if verbose else "",
+            # Make isort compatible with Black
+            # See https://copdips.com/2020/04/making-isort-compatible-with-black.html
+            "--multi-line",
+            "3",
+            "--trailing-comma",
+            "--line-width",
+            "88",
             source,
         ],
         [
@@ -76,6 +83,8 @@ def check(
             "" if modify else "--check",
             "--verbose" if verbose else "--quiet",
             source,
+            # Black is not configurable by design.
+            # It's opinionated.
         ],
         [
             "dmypy",
@@ -86,6 +95,7 @@ def check(
             "--color-output",
             "--package",
             package,
+            # mypy can be configured on mypy.ini
         ],
         [
             "pylint",
@@ -93,11 +103,14 @@ def check(
             "--output-format=colorized",
             "--jobs=0",
             package,
+            # pylint can be configured in .pylintrc
         ],
         (
             ["scc", "--by-file", "--wide", "--no-cocomo", source]
             if command_exists("scc")
             else []
+            # https://github.com/boyter/scc
+            # Install through go's package manager or snap.
         ),
     ]
 
@@ -121,11 +134,11 @@ def check(
         typer.echo(proc.stderr, color=True, nl=False, file=sys.stderr)
         typer.echo(proc.stdout, color=True, nl=False, file=sys.stdout)
         # if not proc.stdout.endswith(b"\n\n"):
-        typer.echo("\n")
+        typer.echo()
 
     if all_success:
         typer.secho(
-            "Your code is excellent and ready to commit!", fg=typer.colors.GREEN
+            "Your code is impeccable and ready to commit!", fg=typer.colors.GREEN
         )
     else:
         typer.secho(

@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Callable, Dict, List
 
 import anytree  # type: ignore
-import numpy  # type: ignore
+import numpy
 import pygraphviz  # type: ignore
+import networkx as nx
 
 from .call_tree import StaticFrame
 from .types import Trial, Trials
@@ -67,9 +68,37 @@ def callgraph(trial: Trial) -> None:
     if command_exists("feh"):
         subprocess.run(["feh", str(img_path)], check=True)
 
+def data_flow_graph(trial: Trial) -> None:
+    dynamic_dfg = nx.DiGraph()
+    sender_to_receiver = {}
+    for tree in trial.call_trees.values():
+        for dynamic_frame in anytree.PreOrderIter(tree.root):
+            if dynamic_frame.static_frame.function_name == 'put':
+                dynamic_dfg.add_node(dynamic_frame)
+                sender_to_receiver[(dynamic_frame.topic_name, dynamic_frame.serial_no)] = dynamic_frame
+    for tree in trial.call_trees.values():
+        for dynamic_frame in anytree.PreOrderIter(tree.root):
+            if dynamic_frame.static_frame.function_name == 'get':
+                dynamic_dfg.add_node(dynamic_frame)
+                sender = sender_to_receiver[(dynamic_frame.topic_name, dynamic_frame.serial_no)]
+                dynamic_dfg.add_edge(sender,dynamic_frame)
+    static_dfg = nx.DiGraph()
+    for source,dest,extra in dynamic_dfg.edges:
+        static_dfg.add_edge(source.static_frame, dest.static_frame) 
+    dot_path = Path(trial.output_dir / "dataflow.dot")
+    img_path = trial.output_dir / "dataflow.png"
+    static_dfg_graphviz = nx.nx_agraph.to_agraph(static_dfg)
+    static_dfg_graphviz.write(dot_path)
+    static_dfg_graphviz.draw(img_path, prog="dot")
+    if command_exists("feh"):
+        subprocess.run(["feh", str(img_path)], check=True)
+
+
+        
+            
 
 analyze_trials_fns: List[Callable[[Trials], None]] = []
-analyze_trial_fns: List[Callable[[Trial], None]] = [callgraph]
+analyze_trial_fns: List[Callable[[Trial], None]] = [callgraph, data_flow_graph]
 
 
 def analyze_trials(trials: Trials) -> None:
@@ -84,3 +113,5 @@ def analyze_trials(trials: Trials) -> None:
     for analyze_trial_fn in analyze_trial_fns:
         for trial in trials.each:
             analyze_trial_fn(trial)
+
+

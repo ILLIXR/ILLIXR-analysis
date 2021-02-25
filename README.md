@@ -14,7 +14,7 @@ $ python3 --version
 Python 3.8.3
 ```
 
-If this does not reports 3.8.x, you can install 3.8.x locally, without
+If this does not report 3.8 or later, you can install 3.8 locally, without
 root, and without modifying your system's Python through
 [pyenv][pyenv]
 
@@ -53,7 +53,7 @@ or `poetry shell` for an interactive shell with the right `$PATH` and
 To run the code,
 ```
 $ poetry shell
-$ python -m illixr.analysis.main run
+$ python -m illixr.analysis.main main
 ```
 
 Before comitting, run the linter and autoformatter. Make sure there is no red text in the following command:

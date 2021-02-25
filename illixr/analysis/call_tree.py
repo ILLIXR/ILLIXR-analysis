@@ -114,6 +114,7 @@ class CallTree:
 
     thread_id: int = attr.ib()
     root: DynamicFrame = attr.ib()
+    calls: int = attr.ib()
 
     @classmethod
     def from_database(
@@ -136,6 +137,8 @@ class CallTree:
                 .pipe(to_categories, ["function_name", "topic_name"])
                 # Omitting "file_name"
             )
+
+        calls = sum(frames["cpu_start"] != 0) + sum(frames["cpu_stop"] != 0)
 
         if verify and not (frames["epoch"] == 0).all():
             raise RuntimeError(
@@ -187,6 +190,7 @@ class CallTree:
         return cls(
             thread_id=thread_id,
             root=index_to_frame[(thread_id, 0)],
+            calls=calls,
         )
 
     @classmethod

@@ -20,6 +20,9 @@ from .util import clip, command_exists
 def callgraph(trial: Trial) -> None:
     """Generate a visualization of the callgraph."""
     total_time = sum([tree.root.cpu_time for tree in trial.call_trees.values()])
+    cpu_timer_calls = sum([tree.calls for tree in trial.call_trees.values()])
+    cpu_timer_overhead = cpu_timer_calls * 400
+    print(cpu_timer_overhead, total_time, cpu_timer_overhead / total_time)
     graphviz = pygraphviz.AGraph(strict=True, directed=True)
     for tree in trial.call_trees.values():
         static_frame_time: Dict[StaticFrame, float] = collections.defaultdict(lambda: 0)
@@ -42,7 +45,7 @@ def callgraph(trial: Trial) -> None:
 
         for static_frame in anytree.PreOrderIter(tree.root.static_frame):
             node_weight = static_frame_time[static_frame] / total_time
-            if static_frame._function_name not in {"get", "put"}:
+            if static_frame.function_name not in {"get", "put"}:
                 graphviz.add_node(
                     id(static_frame),
                     label=str(static_frame),
@@ -54,7 +57,7 @@ def callgraph(trial: Trial) -> None:
                     graphviz.add_edge(
                         id(static_frame.parent),
                         id(static_frame),
-                        penwidth=clip(numpy.sqrt(edge_weight) * 50, 0.1, 10),
+                        penwidth=clip(numpy.sqrt(edge_weight) * 20, 0.1, 15),
                     )
 
     dot_path = Path(trial.output_dir / "callgraph.dot")

@@ -40,6 +40,9 @@ Python 3.8.3
 # Install Poetry
 $ python3 -m pip install poetry
 
+# Install system dependencies
+$ sudo apt-get install -y graphviz graphviz-dev libcgraph6
+
 # Install project dependencies
 $ poetry install
 ```

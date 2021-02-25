@@ -71,6 +71,8 @@ class DynamicFrame(anytree.NodeMixin):  # type: ignore
     _frame_id: int
     cpu_time: int
     static_frame: StaticFrame
+    topic_name: Optional[str]
+    serial_no: Optional[int]
 
     def __str__(self) -> str:
         """Human-readable string representation"""
@@ -89,6 +91,8 @@ class DynamicFrame(anytree.NodeMixin):  # type: ignore
         self._frame_id = index[1]
         self.cpu_time = row["cpu_stop"] - row["cpu_start"]
         self.static_frame = static_frame
+        self.topic_name = row["topic_name"]
+        self.serial_no = row["serial_no"]
         self.parent = parent
         if children:
             self.children = children

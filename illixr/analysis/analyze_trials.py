@@ -80,11 +80,12 @@ def data_flow_graph(trial: Trial) -> None:
         for dynamic_frame in anytree.PreOrderIter(tree.root):
             if dynamic_frame.static_frame.function_name == 'get':
                 dynamic_dfg.add_node(dynamic_frame)
-                sender = sender_to_receiver[(dynamic_frame.topic_name, dynamic_frame.serial_no)]
-                dynamic_dfg.add_edge(sender,dynamic_frame)
+                if (dynamic_frame.topic_name, dynamic_frame.serial_no) in sender_to_receiver:
+                    sender = sender_to_receiver[(dynamic_frame.topic_name, dynamic_frame.serial_no)]
+                    dynamic_dfg.add_edge(sender,dynamic_frame)
     static_dfg = nx.DiGraph()
-    for source,dest,extra in dynamic_dfg.edges:
-        static_dfg.add_edge(source.static_frame, dest.static_frame) 
+    for source,dest in dynamic_dfg.edges:
+        static_dfg.add_edge(get_plugin_id(source.static_frame), get_plugin_id(dest.static_frame)) 
     dot_path = Path(trial.output_dir / "dataflow.dot")
     img_path = trial.output_dir / "dataflow.png"
     static_dfg_graphviz = nx.nx_agraph.to_agraph(static_dfg)
@@ -92,6 +93,12 @@ def data_flow_graph(trial: Trial) -> None:
     static_dfg_graphviz.draw(img_path, prog="dot")
     if command_exists("feh"):
         subprocess.run(["feh", str(img_path)], check=True)
+
+def get_plugin_id(frame: StaticFrame) -> int:
+    if frame._plugin_id == 0 and frame.parent != None:
+        return get_plugin_id(frame.parent)
+    else:
+        return frame._plugin_id
 
 
         

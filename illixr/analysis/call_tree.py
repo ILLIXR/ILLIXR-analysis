@@ -10,6 +10,7 @@ from typing import (
     Any,
     Dict,
     Iterable,
+    List,
     Mapping,
     Optional,
     Tuple,
@@ -31,20 +32,32 @@ class DataIntegrityWarning(Warning):
     """Non-fatal warning that the data might be invalid."""
 
 
+T = TypeVar("T")
+
+
+def falsy_to_none(elem: T) -> Optional[T]:
+    if elem:
+        return elem
+    else:
+        return None
+
+
 class StaticFrame(anytree.NodeMixin):  # type: ignore
     """A dynamic stack frame."""
 
     function_name: str
-    plugin_id: int
-    _topic_name: str
+    file_name: str
+    line: int
+    plugin: Optional[str]
+    topic_name: Optional[str]
 
     def __str__(self) -> str:
         """Human-readable string representation"""
         ret = f"{self.function_name}"
         if self.function_name == "":
             ret += "thread"
-        if self.plugin_id:
-            ret += f"\nplugin {self.plugin_id}"
+        if self.plugin:
+            ret += f"\nplugin {self.plugin}"
         # if self._topic_name:
         #     ret += f", on {self._topic_name}"
         return ret
@@ -57,8 +70,10 @@ class StaticFrame(anytree.NodeMixin):  # type: ignore
     ) -> None:
         """Constructs a StaticFrame. See anytree.NodeMixin for parent and children."""
         self.function_name = cast(str, row["function_name"])
-        self.plugin_id = cast(int, row["plugin_id"])
-        self._topic_name = cast(str, row["topic_name"])
+        self.file_name = cast(str, row["file_name"])
+        self.line = cast(int, row["line"])
+        self.plugin = falsy_to_none(cast(str, row["plugin"]))
+        self.topic_name = falsy_to_none(cast(str, row["topic_name"]))
         self.parent = parent
         if children:
             self.children = children
@@ -70,8 +85,8 @@ class DynamicFrame(anytree.NodeMixin):  # type: ignore
     thread_id: int
     _frame_id: int
     cpu_time: int
+    wall_time: int
     static_frame: StaticFrame
-    topic_name: Optional[str]
     serial_no: Optional[int]
 
     def __str__(self) -> str:
@@ -90,8 +105,8 @@ class DynamicFrame(anytree.NodeMixin):  # type: ignore
         self.thread_id = index[0]
         self._frame_id = index[1]
         self.cpu_time = row["cpu_stop"] - row["cpu_start"]
+        self.wall_time = row["wall_stop"] - row["wall_start"]
         self.static_frame = static_frame
-        self.topic_name = row["topic_name"]
         self.serial_no = row["serial_no"]
         self.parent = parent
         if children:
@@ -116,9 +131,10 @@ class CallTree:
 
     """
 
-    thread_id: int = attr.ib()
-    root: DynamicFrame = attr.ib()
-    calls: int = attr.ib()
+    thread_id: int
+    root: DynamicFrame
+    calls: int
+    static_to_dynamic: Mapping[StaticFrame, List[DynamicFrame]]
 
     @classmethod
     def from_database(
@@ -157,7 +173,7 @@ class CallTree:
         # Don't create duplicates of the dynamic and static frame
         index_to_frame: Dict[Tuple[int, int], DynamicFrame] = {}
         frame_to_static_children: Dict[
-            Union[DynamicFrame, None], Dict[Tuple[str, int, str], StaticFrame]
+            Union[DynamicFrame, None], Dict[Tuple[str, str, str], StaticFrame]
         ] = collections.defaultdict(dict)
         for index, row in tqdm(
             frames.iterrows(),
@@ -176,8 +192,8 @@ class CallTree:
                 parent.static_frame if parent is not None else None
             ]
             static_info = cast(
-                Tuple[str, int, str],
-                tuple(row[["function_name", "plugin_id", "topic_name"]]),
+                Tuple[str, str, str],
+                tuple(row[["function_name", "plugin", "topic_name"]]),
             )
             if static_info not in static_children:
                 # Not exists; create
@@ -191,9 +207,16 @@ class CallTree:
             # Update the index_to_frame so its children can find it.
             index_to_frame[index] = frame
 
+        static_to_dynamic: Dict[
+            StaticFrame, List[DynamicFrame]
+        ] = collections.defaultdict(list)
+        for frame in frames:
+            static_to_dynamic[frame.static_frame] = frame
+
         return cls(
             thread_id=thread_id,
             root=index_to_frame[(thread_id, 0)],
+            static_to_dynamic=static_to_dynamic,
             calls=calls,
         )
 

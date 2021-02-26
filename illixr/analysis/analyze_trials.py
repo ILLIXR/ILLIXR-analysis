@@ -3,17 +3,15 @@
 This should not take into account ILLIXR-specific information.
 """
 
-from typing import Callable, List
-
 import collections
 import subprocess
 from pathlib import Path
 from typing import Callable, Dict, List
 
 import anytree  # type: ignore
+import networkx as nx  # type: ignore
 import numpy
 import pygraphviz  # type: ignore
-import networkx as nx
 
 from .call_tree import StaticFrame
 from .types import Trial, Trials
@@ -70,24 +68,35 @@ def callgraph(trial: Trial) -> None:
     if command_exists("feh"):
         subprocess.run(["feh", str(img_path)], check=True)
 
+
 def data_flow_graph(trial: Trial) -> None:
+    """Generates a visualization of dataflow over Switchboard between plugins."""
     dynamic_dfg = nx.DiGraph()
     sender_to_receiver = {}
     for tree in trial.call_trees.values():
         for dynamic_frame in anytree.PreOrderIter(tree.root):
-            if dynamic_frame.static_frame.function_name == 'put':
+            if dynamic_frame.static_frame.function_name == "put":
                 dynamic_dfg.add_node(dynamic_frame)
-                sender_to_receiver[(dynamic_frame.topic_name, dynamic_frame.serial_no)] = dynamic_frame
+                sender_to_receiver[
+                    (dynamic_frame.topic_name, dynamic_frame.serial_no)
+                ] = dynamic_frame
     for tree in trial.call_trees.values():
         for dynamic_frame in anytree.PreOrderIter(tree.root):
-            if dynamic_frame.static_frame.function_name == 'get':
+            if dynamic_frame.static_frame.function_name == "get":
                 dynamic_dfg.add_node(dynamic_frame)
-                if (dynamic_frame.topic_name, dynamic_frame.serial_no) in sender_to_receiver:
-                    sender = sender_to_receiver[(dynamic_frame.topic_name, dynamic_frame.serial_no)]
-                    dynamic_dfg.add_edge(sender,dynamic_frame)
+                if (
+                    dynamic_frame.topic_name,
+                    dynamic_frame.serial_no,
+                ) in sender_to_receiver:
+                    sender = sender_to_receiver[
+                        (dynamic_frame.topic_name, dynamic_frame.serial_no)
+                    ]
+                    dynamic_dfg.add_edge(sender, dynamic_frame)
     static_dfg = nx.DiGraph()
-    for source,dest in dynamic_dfg.edges:
-        static_dfg.add_edge(get_plugin_id(source.static_frame), get_plugin_id(dest.static_frame)) 
+    for source, dest in dynamic_dfg.edges:
+        static_dfg.add_edge(
+            get_plugin_id(source.static_frame), get_plugin_id(dest.static_frame)
+        )
     dot_path = Path(trial.output_dir / "dataflow.dot")
     img_path = trial.output_dir / "dataflow.png"
     static_dfg_graphviz = nx.nx_agraph.to_agraph(static_dfg)
@@ -96,15 +105,14 @@ def data_flow_graph(trial: Trial) -> None:
     if command_exists("feh"):
         subprocess.run(["feh", str(img_path)], check=True)
 
+
 def get_plugin_id(frame: StaticFrame) -> int:
-    if frame._plugin_id == 0 and frame.parent != None:
+    """Returns the ID of the plugin responsible for calling this static frame (if known). Else 0."""
+    if frame.plugin_id == 0 and frame.parent is not None:
         return get_plugin_id(frame.parent)
     else:
-        return frame._plugin_id
+        return frame.plugin_id
 
-
-        
-            
 
 analyze_trials_fns: List[Callable[[Trials], None]] = []
 analyze_trial_fns: List[Callable[[Trial], None]] = [callgraph, data_flow_graph]

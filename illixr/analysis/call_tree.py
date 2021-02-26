@@ -35,7 +35,7 @@ class StaticFrame(anytree.NodeMixin):  # type: ignore
     """A dynamic stack frame."""
 
     function_name: str
-    _plugin_id: int
+    plugin_id: int
     _topic_name: str
 
     def __str__(self) -> str:
@@ -43,8 +43,8 @@ class StaticFrame(anytree.NodeMixin):  # type: ignore
         ret = f"{self.function_name}"
         if self.function_name == "":
             ret += "thread"
-        if self._plugin_id:
-            ret += f"\nplugin {self._plugin_id}"
+        if self.plugin_id:
+            ret += f"\nplugin {self.plugin_id}"
         # if self._topic_name:
         #     ret += f", on {self._topic_name}"
         return ret
@@ -57,7 +57,7 @@ class StaticFrame(anytree.NodeMixin):  # type: ignore
     ) -> None:
         """Constructs a StaticFrame. See anytree.NodeMixin for parent and children."""
         self.function_name = cast(str, row["function_name"])
-        self._plugin_id = cast(int, row["plugin_id"])
+        self.plugin_id = cast(int, row["plugin_id"])
         self._topic_name = cast(str, row["topic_name"])
         self.parent = parent
         if children:

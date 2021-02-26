@@ -87,6 +87,7 @@ def flatten(its: Iterable[Iterable[_T]]) -> Iterable[_T]:
 
 def compose_all(fns: Iterable[Callable[[_T], _T]]) -> Callable[[_T], _T]:
     """Compose all functions; the output of one is input to next."""
+
     def ret(elem: _T) -> _T:
         for fn in fns:
             elem = fn(elem)

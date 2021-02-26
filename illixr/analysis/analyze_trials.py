@@ -3,6 +3,8 @@
 This should not take into account ILLIXR-specific information.
 """
 
+from typing import Callable, List
+
 import collections
 import subprocess
 from pathlib import Path
@@ -120,5 +122,3 @@ def analyze_trials(trials: Trials) -> None:
     for analyze_trial_fn in analyze_trial_fns:
         for trial in trials.each:
             analyze_trial_fn(trial)
-
-

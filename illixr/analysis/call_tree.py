@@ -62,6 +62,12 @@ class StaticFrame(anytree.NodeMixin):  # type: ignore
         #     ret += f", on {self._topic_name}"
         return ret
 
+    def __repr__(self) -> str:
+        ancestors = "->".join(
+            f"{node.file_name}:{node.line}:{node.function_name}" for node in self.path
+        )
+        return f"{ancestors}->{self.file_name}:{self.line}:{self.function_name} {self.plugin=} {self.topic_name=}"
+
     def __init__(
         self,
         row: pandas.Series[Any],
@@ -86,12 +92,17 @@ class DynamicFrame(anytree.NodeMixin):  # type: ignore
     _frame_id: int
     cpu_time: int
     wall_time: int
+    wall_start: int
+    wall_stop: int
     static_frame: StaticFrame
     serial_no: Optional[int]
 
     def __str__(self) -> str:
         """Human-readable string representation"""
         return f"{self.thread_id} {self._frame_id}"
+
+    def __repr__(self) -> str:
+        return f"{self.thread_id=} {self._frame_id=}"
 
     def __init__(
         self,
@@ -106,6 +117,8 @@ class DynamicFrame(anytree.NodeMixin):  # type: ignore
         self._frame_id = index[1]
         self.cpu_time = row["cpu_stop"] - row["cpu_start"]
         self.wall_time = row["wall_stop"] - row["wall_start"]
+        self.wall_start = row["wall_start"]
+        self.wall_stop = row["wall_stop"]
         self.static_frame = static_frame
         self.serial_no = row["serial_no"]
         self.parent = parent
@@ -175,6 +188,9 @@ class CallTree:
         frame_to_static_children: Dict[
             Union[DynamicFrame, None], Dict[Tuple[str, str, str], StaticFrame]
         ] = collections.defaultdict(dict)
+        static_to_dynamic: Dict[
+            StaticFrame, List[DynamicFrame]
+        ] = collections.defaultdict(list)
         for index, row in tqdm(
             frames.iterrows(),
             total=len(frames),
@@ -206,12 +222,7 @@ class CallTree:
 
             # Update the index_to_frame so its children can find it.
             index_to_frame[index] = frame
-
-        static_to_dynamic: Dict[
-            StaticFrame, List[DynamicFrame]
-        ] = collections.defaultdict(list)
-        for frame in frames:
-            static_to_dynamic[frame.static_frame] = frame
+            static_to_dynamic[frame.static_frame].append(frame)
 
         return cls(
             thread_id=thread_id,

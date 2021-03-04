@@ -6,7 +6,17 @@ This should not take into account ILLIXR-specific information.
 import collections
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Dict, Iterator, List, Mapping, Optional, Set, Tuple
+from typing import (
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Set,
+    Tuple,
+)
 
 import anytree  # type: ignore
 import networkx as nx  # type: ignore
@@ -56,7 +66,7 @@ def callgraph(trial: Trial) -> None:
                     graphviz.add_edge(
                         id(static_frame.parent),
                         id(static_frame),
-                        penwidth=clip(numpy.sqrt(edge_weight) * 20, 0.1, 15),
+                        penwidth=clip((edge_weight) * 20, 0.1, 45),
                     )
 
     dot_path = Path(trial.output_dir / "callgraph.dot")
@@ -66,7 +76,13 @@ def callgraph(trial: Trial) -> None:
 
     for tree in trial.call_trees.values():
         for static_frame in anytree.PreOrderIter(tree.root.static_frame):
-            if static_frame.function_name in {"_p_one_iteration", "callback"}:
+            if static_frame.function_name in {
+                "_p_one_iteration",
+                "callback",
+                "cam",
+                "IMU",
+                "load_camera_data",
+            }:
                 dynamic_frames = tree.static_to_dynamic[static_frame]
                 times = (
                     numpy.array(
@@ -76,7 +92,7 @@ def callgraph(trial: Trial) -> None:
                 )
                 plugin = get_plugin(static_frame)
                 print(
-                    f"{plugin}: {numpy.mean(times):.0f} +/- {numpy.std(times):.0f} (us), 75% < {numpy.percentile(times, 75):.0f}"
+                    f"{plugin} {static_frame.function_name} (us): {numpy.mean(times):,.0f} +/- {numpy.std(times):,.0f}, len(data) = {len(times)}, data[75%] < {numpy.percentile(times, 75):,.0f}, data[95%] < {numpy.percentile(times, 95):,.0f}"
                 )
     # if command_exists("feh"):
     #     subprocess.run(["feh", str(img_path)], check=True)
@@ -149,7 +165,8 @@ def data_flow_graph(trial: Trial) -> None:
                         put, frame, topic_name=topic_name, type=EdgeType.sync
                     )
                 else:
-                    print(f"cb: {data_id} not found")
+                    pass
+                    # print(f"cb: {data_id} not found")
 
     static_dfg = nx.DiGraph()
     for src, dst, edge_attrs in dynamic_dfg.edges(data=True):
@@ -208,11 +225,29 @@ def data_flow_graph(trial: Trial) -> None:
     # for plugin, nodes in plugin_to_nodes.items():
     #     static_dfg_graphviz.add_subgraph(map(frame_to_id, nodes), plugin, rank="same", rankdir="TB")
 
-    src_plugin = "offline_imu_cam"
-    dst_plugin = "timewarp_gl"
     path_static_to_dynamic: Mapping[
         Tuple[StaticFrame, ...], List[Tuple[DynamicFrame, ...]]
     ] = collections.defaultdict(list)
+
+    def is_dst(static_frame: StaticFrame) -> bool:
+        return all(
+            (
+                get_plugin(static_frame) == "timewarp_gl",
+                get_topic(static_frame) == "hologram_in",
+                static_frame.function_name == "put",
+            )
+        )
+
+    def is_src(static_frame: StaticFrame) -> bool:
+        return all(
+            (
+                get_plugin(static_frame) == "offline_imu_cam",
+                static_frame.function_name == "put",
+                # get_topic(static_frame) == "imu_cam",
+            )
+        )
+
+    dynamic_dfg_rev = dynamic_dfg.reverse()
 
     def explore(
         dynamic_frame: DynamicFrame,
@@ -222,13 +257,9 @@ def data_flow_graph(trial: Trial) -> None:
     ) -> Iterator[Tuple[Tuple[StaticFrame, ...], Tuple[DynamicFrame, ...]]]:
         static_path += (dynamic_frame.static_frame,)
         dynamic_path += (dynamic_frame,)
-        if (
-            get_plugin(dynamic_frame.static_frame) == "timewarp_gl"
-            and get_topic(dynamic_frame.static_frame) == "hologram_in"
-            and dynamic_frame.static_frame.function_name == "put"
-        ):
+        if is_src(dynamic_frame.static_frame):
             yield (static_path, dynamic_path)
-        for next_dynamic_frame in dynamic_dfg[dynamic_frame]:
+        for next_dynamic_frame in dynamic_dfg_rev[dynamic_frame]:
             if next_dynamic_frame.static_frame not in tabu:
                 yield from explore(
                     next_dynamic_frame,
@@ -237,23 +268,40 @@ def data_flow_graph(trial: Trial) -> None:
                     tabu | {next_dynamic_frame.static_frame},
                 )
 
-    for static_frame in static_dfg:
-        if (
-            static_frame.function_name == "put"
-            and get_plugin(static_frame) == src_plugin
-        ):
+    for static_dst in static_dfg:
+        if is_dst(static_dst):
             for call_tree in trial.call_trees.values():
-                for dynamic_frame in call_tree.static_to_dynamic[static_frame]:
+                for dynamic_dst in call_tree.static_to_dynamic[static_dst]:
                     for static_path, dynamic_path in explore(
-                        dynamic_frame, (), (), {dynamic_frame.static_frame}
+                        dynamic_dst, (), (), {dynamic_dst.static_frame}
                     ):
-                        path_static_to_dynamic[static_path].append(dynamic_path)
+                        path_static_to_dynamic[static_path[::-1]].append(
+                            dynamic_path[::-1]
+                        )
+
+    def get_input_times(path: Iterable[DynamicFrame]) -> Iterable[int]:
+        return (
+            node.wall_start for node in path if node.static_frame.function_name == "put"
+        )
 
     path_static_to_dynamic = {
         static: dynamic
         for static, dynamic in path_static_to_dynamic.items()
         if len(dynamic) > 250
     }
+
+    # path_static_to_dynamic_freshest: Mapping[
+    #     Tuple[StaticFrame, ...], List[Tuple[DynamicFrame, ...]]
+    # ] = collections.defaultdict(list)
+    # for static_path, dynamic_paths in path_static_to_dynamic.items():
+    #     freshest_inputs_time: Optional[Tuple[int, ...]] = None
+    #     for dynamic_path in dynamic_paths:
+    #         inputs_time = tuple(get_input_times(dynamic_path))
+    #         if freshest_inputs_time is None or all(x > y for x, y in zip(inputs_time, freshest_inputs_time)):
+    #             path_static_to_dynamic_freshest[static_path].append(dynamic_path)
+    #             freshest_inputs_time = inputs_time
+
+    # path_static_to_dynamic = path_static_to_dynamic_freshest
 
     # TODO: compute how many puts are "used/ignored"
 
@@ -274,49 +322,59 @@ def data_flow_graph(trial: Trial) -> None:
 
     # assert len(path_static_to_dynamic) == 6
     for static_path, dynamic_paths in path_static_to_dynamic.items():
+        print()
         print(
             len(dynamic_paths),
-            [
-                f"{frame_to_label(frame)} {str(frame)} on {get_topic(frame)}"
-                for frame in static_path
-            ],
+            " -> ".join(f"{get_plugin(frame)}" for frame in static_path),
         )
         all_transits = (
             numpy.array(
-                [
+                list(
                     [node.wall_start for node in dynamic_path]
                     + [dynamic_path[-1].wall_stop]
                     for dynamic_path in dynamic_paths
-                ]
+                )
             )
             / 1e6
         )
 
-        assert (all_transits[1:] - all_transits[:-1] >= 0).all()
+        import pandas as pd  # type: ignore
 
-        assert (all_transits[:, 1:] - all_transits[:, :-1] >= 0).all()
+        df = pd.DataFrame(all_transits)
+        df.columns = [get_plugin(node.static_frame) for node in dynamic_paths[0]] + [
+            "end"
+        ]
+        df.to_csv("all_transits.csv")
+
+        assert (all_transits[1:] - all_transits[:-1] < 0).sum() < len(
+            all_transits
+        ) * 0.01
+
+        assert (all_transits[:, 1:] - all_transits[:, :-1] < 0).sum() < len(
+            all_transits
+        ) * 0.01
 
         latency = all_transits - all_transits[:, 0][:, numpy.newaxis]
 
         for i in range(len(dynamic_paths[0])):
             m = latency[:, i].mean()
             s = latency[:, i].std()
-            print(f"{m:.0f} +/- {s:.0f} (ms)")
+            print(f"{m:,.0f} +/- {s:,.0f} (ms)")
             print(frame_to_label(static_path[i]).replace("\\n", "\n"))
+
         end_latency = latency[:, -1]
         print(
-            f"Total latency = {end_latency.mean():.0f} +/- {end_latency.std():.0f}, data[75%] = {numpy.percentile(end_latency, 75):.0f} (ms)"
+            f"Total latency (ms): {end_latency.mean():,.0f} +/- {end_latency.std():,.0f}, data[75%] = {numpy.percentile(end_latency, 75):,.0f}"
         )
         duration = all_transits[0, -1] - all_transits[0, 0]
-        period = all_transits[1:, 0] - all_transits[:-1, 0]
+        period = all_transits[1:, -1] - all_transits[:-1, -1]
         print(
-            f"Period = {period.mean():.0f} +/- {period.std():.0f}, data[75%] = {numpy.percentile(period, 75):.0f} (ms)"
+            f"Period (ms): {period.mean():,.0f} +/- {period.std():,.0f}, min(data) = {period.min()}, data[50%] = {numpy.percentile(period, 50):,.0f}, data[75%] = {numpy.percentile(period, 75):,.0f}, data[95%] = {numpy.percentile(period, 95):,.0f}, data[99%] = {numpy.percentile(period, 99):,.0f}, max = {period.max()}"
         )
         rt = all_transits[1:, -1] - all_transits[:-1, 0]
         print(
-            f"RT = {rt.mean():.0f} +/- {rt.std():.0f}, data[75%] = {numpy.percentile(rt, 75):.0f} (ms)"
+            f"RT (ms): {rt.mean():,.0f} +/- {rt.std():,.0f}, min(data) = {rt.min()}, data[50%] = {numpy.percentile(rt, 50):,.0f}, data[75%] = {numpy.percentile(rt, 75):,.0f}, data[95%] = {numpy.percentile(rt, 95):,.0f}, data[99%] = {numpy.percentile(rt, 99):,.0f}, max = {rt.max()}"
         )
-        print()
         # print(numpy.mean(latency, axis=0))
         # print(numpy.std(latency, axis=0))
 

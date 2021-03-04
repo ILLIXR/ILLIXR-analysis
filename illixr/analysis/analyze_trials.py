@@ -4,6 +4,8 @@ This should not take into account ILLIXR-specific information.
 """
 
 import collections
+import random
+import matplotlib.pyplot as plt
 from enum import Enum
 from pathlib import Path
 from typing import (
@@ -356,6 +358,8 @@ def data_flow_graph(trial: Trial) -> None:
 
         latency = all_transits - all_transits[:, 0][:, numpy.newaxis]
 
+        data_flow_bar_chart(static_path,dynamic_path, latency)
+
         for i in range(len(dynamic_paths[0])):
             m = latency[:, i].mean()
             s = latency[:, i].std()
@@ -377,6 +381,22 @@ def data_flow_graph(trial: Trial) -> None:
         )
         # print(numpy.mean(latency, axis=0))
         # print(numpy.std(latency, axis=0))
+
+def data_flow_bar_chart(static_path, dynamic_paths, latencies) -> None: 
+    rowNum = -1.5 
+    coIndex = 0  
+    fig, ax = plt.subplots()  
+    plt.title('Data Flow')  
+    plt.xlabel('Wall Time')  
+    plt.ylabel('iteration')  
+    colors = ['red','orange','yellow','green','cyan','blue','purple','pink']   
+    ax.grid(True)
+    for y,row in enumerate(latencies): 
+        for i in range(len(row)-1):
+            plt.broken_barh([(row[i],row[i+1]-row[i])],(y,1),facecolors = colors[i%len(colors)])
+    random_num = random.randint(1,1000000000)
+    fig.savefig(f"dataflow_time_{random_num}.png")
+    plt.close(fig) 
 
 
 def get_plugin(frame: StaticFrame) -> Optional[str]:

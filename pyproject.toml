@@ -23,6 +23,7 @@ tqdm = "^4.56.0"
 pygraphviz = "^1.7"
 "charmonium.cache" = "^0.6.0"
 matplotlib = "^3.3.4"
+ipdb = "^0.13.6"
 
 [tool.poetry.dev-dependencies]
 autoflake = "^1.4"

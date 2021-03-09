@@ -154,7 +154,7 @@ class CallTree:
         cls: Type[_Class],
         database_url: str,
         verify: bool = False,
-    ) -> _Class:
+    ) -> Optional[_Class]:
         """Reads a CallForest from the database
 
         This is the "opposite" of ILLIXR/runtime/frame_logger2.hpp.
@@ -177,6 +177,9 @@ class CallTree:
             raise RuntimeError(
                 "Frames come from different epochs;" "They need to be merged."
             )
+
+        if len(frames) == 0:
+            return None
 
         if verify and frames.index.levels[0].nunique() != 1:
             raise RuntimeError("Frames come from different threads")
@@ -248,4 +251,4 @@ class CallTree:
                 unit="thread",
             )
         )
-        return {tree.thread_id: tree for tree in trees}
+        return {tree.thread_id: tree for tree in trees if tree is not None}

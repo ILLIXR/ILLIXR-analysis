@@ -5,7 +5,6 @@ This should not take into account ILLIXR-specific information.
 
 import collections
 import random
-import matplotlib.pyplot as plt
 from enum import Enum
 from pathlib import Path
 from typing import (
@@ -21,6 +20,7 @@ from typing import (
 )
 
 import anytree  # type: ignore
+import matplotlib.pyplot as plt
 import networkx as nx  # type: ignore
 import numpy
 import pygraphviz  # type: ignore
@@ -234,7 +234,7 @@ def data_flow_graph(trial: Trial) -> None:
     def is_dst(static_frame: StaticFrame) -> bool:
         return all(
             (
-                get_plugin(static_frame) == "timewarp_gl",
+                get_plugin(static_frame) in {"timewarp_gl", "6"},
                 get_topic(static_frame) == "hologram_in",
                 static_frame.function_name == "put",
             )
@@ -243,9 +243,9 @@ def data_flow_graph(trial: Trial) -> None:
     def is_src(static_frame: StaticFrame) -> bool:
         return all(
             (
-                get_plugin(static_frame) == "offline_imu_cam",
+                get_plugin(static_frame) in {"offline_imu_cam", "7", "8"},
                 static_frame.function_name == "put",
-                # get_topic(static_frame) == "imu_cam",
+                # get_topic(static_frame) in {"imu_cam", "imu", "cam"},
             )
         )
 
@@ -256,9 +256,11 @@ def data_flow_graph(trial: Trial) -> None:
         static_path: Tuple[StaticFrame, ...],
         dynamic_path: Tuple[DynamicFrame, ...],
         tabu: Set[DynamicFrame],
+        iter: int,
     ) -> Iterator[Tuple[Tuple[StaticFrame, ...], Tuple[DynamicFrame, ...]]]:
         static_path += (dynamic_frame.static_frame,)
         dynamic_path += (dynamic_frame,)
+        assert iter < 20
         if is_src(dynamic_frame.static_frame):
             yield (static_path, dynamic_path)
         for next_dynamic_frame in dynamic_dfg_rev[dynamic_frame]:
@@ -268,6 +270,7 @@ def data_flow_graph(trial: Trial) -> None:
                     static_path,
                     dynamic_path,
                     tabu | {next_dynamic_frame.static_frame},
+                    iter + 1,
                 )
 
     for static_dst in static_dfg:
@@ -275,7 +278,7 @@ def data_flow_graph(trial: Trial) -> None:
             for call_tree in trial.call_trees.values():
                 for dynamic_dst in call_tree.static_to_dynamic[static_dst]:
                     for static_path, dynamic_path in explore(
-                        dynamic_dst, (), (), {dynamic_dst.static_frame}
+                        dynamic_dst, (), (), {dynamic_dst.static_frame}, 0
                     ):
                         path_static_to_dynamic[static_path[::-1]].append(
                             dynamic_path[::-1]
@@ -292,18 +295,20 @@ def data_flow_graph(trial: Trial) -> None:
         if len(dynamic) > 250
     }
 
-    # path_static_to_dynamic_freshest: Mapping[
-    #     Tuple[StaticFrame, ...], List[Tuple[DynamicFrame, ...]]
-    # ] = collections.defaultdict(list)
-    # for static_path, dynamic_paths in path_static_to_dynamic.items():
-    #     freshest_inputs_time: Optional[Tuple[int, ...]] = None
-    #     for dynamic_path in dynamic_paths:
-    #         inputs_time = tuple(get_input_times(dynamic_path))
-    #         if freshest_inputs_time is None or all(x > y for x, y in zip(inputs_time, freshest_inputs_time)):
-    #             path_static_to_dynamic_freshest[static_path].append(dynamic_path)
-    #             freshest_inputs_time = inputs_time
+    path_static_to_dynamic_freshest: Mapping[
+        Tuple[StaticFrame, ...], List[Tuple[DynamicFrame, ...]]
+    ] = collections.defaultdict(list)
+    for static_path, dynamic_paths in path_static_to_dynamic.items():
+        freshest_inputs_time: Optional[Tuple[int, ...]] = None
+        for dynamic_path in dynamic_paths:
+            inputs_time = tuple(get_input_times(dynamic_path))
+            if freshest_inputs_time is None or all(
+                x > y for x, y in zip(inputs_time, freshest_inputs_time)
+            ):
+                path_static_to_dynamic_freshest[static_path].append(dynamic_path)
+                freshest_inputs_time = inputs_time
 
-    # path_static_to_dynamic = path_static_to_dynamic_freshest
+    path_static_to_dynamic = path_static_to_dynamic_freshest
 
     # TODO: compute how many puts are "used/ignored"
 
@@ -313,9 +318,9 @@ def data_flow_graph(trial: Trial) -> None:
                 frame_to_id(src),
                 frame_to_id(dst),
             ).attr["color"] = "blue"
-            static_dfg_graphviz.get_edge(frame_to_id(src), frame_to_id(dst),).attr[
-                "label"
-            ] += " " + str(len(instances))
+            # static_dfg_graphviz.get_edge(frame_to_id(src), frame_to_id(dst),).attr[
+            #     "label"
+            # ] += " " + str(len(instances))
 
     dot_path = Path(trial.output_dir / "dataflow.dot")
     img_path = trial.output_dir / "dataflow.png"
@@ -358,7 +363,7 @@ def data_flow_graph(trial: Trial) -> None:
 
         latency = all_transits - all_transits[:, 0][:, numpy.newaxis]
 
-        data_flow_bar_chart(static_path,dynamic_path, latency)
+        # data_flow_bar_chart(static_path,dynamic_path, latency)
 
         for i in range(len(dynamic_paths[0])):
             m = latency[:, i].mean()
@@ -382,21 +387,26 @@ def data_flow_graph(trial: Trial) -> None:
         # print(numpy.mean(latency, axis=0))
         # print(numpy.std(latency, axis=0))
 
-def data_flow_bar_chart(static_path, dynamic_paths, latencies) -> None: 
-    rowNum = -1.5 
-    coIndex = 0  
-    fig, ax = plt.subplots()  
-    plt.title('Data Flow')  
-    plt.xlabel('Wall Time')  
-    plt.ylabel('iteration')  
-    colors = ['red','orange','yellow','green','cyan','blue','purple','pink']   
+
+def data_flow_bar_chart(static_path, dynamic_paths, latencies) -> None:
+    rowNum = -1.5
+    coIndex = 0
+    fig, ax = plt.subplots()
+    plt.title("Data Flow")
+    plt.xlabel("Wall Time")
+    plt.ylabel("iteration")
+    colors = ["red", "orange", "yellow", "green", "cyan", "blue", "purple", "pink"]
     ax.grid(True)
-    for y,row in enumerate(latencies): 
-        for i in range(len(row)-1):
-            plt.broken_barh([(row[i],row[i+1]-row[i])],(y,1),facecolors = colors[i%len(colors)])
-    random_num = random.randint(1,1000000000)
+    for y, row in enumerate(latencies):
+        for i in range(len(row) - 1):
+            plt.broken_barh(
+                [(row[i], row[i + 1] - row[i])],
+                (y, 1),
+                facecolors=colors[i % len(colors)],
+            )
+    random_num = random.randint(1, 1000000000)
     fig.savefig(f"dataflow_time_{random_num}.png")
-    plt.close(fig) 
+    plt.close(fig)
 
 
 def get_plugin(frame: StaticFrame) -> Optional[str]:

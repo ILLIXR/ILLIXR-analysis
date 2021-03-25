@@ -35,7 +35,7 @@ def callgraph(trial: Trial) -> None:
     total_time = sum([tree.root.cpu_time for tree in trial.call_trees.values()])
     cpu_timer_calls = sum([tree.calls for tree in trial.call_trees.values()])
     cpu_timer_overhead = cpu_timer_calls * 400
-    print(cpu_timer_overhead, total_time, cpu_timer_overhead / total_time)
+    print(cpu_timer_overhead, total_time, cpu_timer_overhead / total_time if total_time != 0 else "NaN")
     graphviz = pygraphviz.AGraph(strict=True, directed=True)
     for tree in trial.call_trees.values():
         static_frame_time: Dict[StaticFrame, float] = collections.defaultdict(lambda: 0)
@@ -114,7 +114,7 @@ def data_flow_graph(trial: Trial) -> None:
     for tree in trial.call_trees.values():
         last_comm: Optional[DynamicFrame] = None
         for frame in anytree.PreOrderIter(tree.root):
-            if frame.static_frame.function_name in {"put", "get", "callback"}:
+            if frame.static_frame.function_name in {"put", "get", "callback", "entry", "exit"}:
                 if last_comm is not None:
                     dynamic_dfg.add_edge(
                         last_comm, frame, topic_name=None, type=EdgeType.program
@@ -218,7 +218,7 @@ def data_flow_graph(trial: Trial) -> None:
             )
             for node in [src, dst]:
                 plugin = get_plugin(node)
-                assert plugin
+                # assert plugin
                 plugin_to_nodes[plugin].append(node)
                 static_dfg_graphviz.get_node(frame_to_id(node)).attr[
                     "label"
@@ -232,22 +232,10 @@ def data_flow_graph(trial: Trial) -> None:
     ] = collections.defaultdict(list)
 
     def is_dst(static_frame: StaticFrame) -> bool:
-        return all(
-            (
-                get_plugin(static_frame) in {"timewarp_gl", "6"},
-                get_topic(static_frame) == "hologram_in",
-                static_frame.function_name == "put",
-            )
-        )
+        return static_frame.function_name == "exit"
 
     def is_src(static_frame: StaticFrame) -> bool:
-        return all(
-            (
-                get_plugin(static_frame) in {"offline_imu_cam", "7", "8"},
-                static_frame.function_name == "put",
-                # get_topic(static_frame) in {"imu_cam", "imu", "cam"},
-            )
-        )
+        return static_frame.function_name == "entry"
 
     dynamic_dfg_rev = dynamic_dfg.reverse()
 
@@ -355,34 +343,35 @@ def data_flow_graph(trial: Trial) -> None:
 
         assert (all_transits[1:] - all_transits[:-1] < 0).sum() < len(
             all_transits
-        ) * 0.01
+        ) * 0.01, "row monotonicity is violated"
 
         assert (all_transits[:, 1:] - all_transits[:, :-1] < 0).sum() < len(
             all_transits
-        ) * 0.01
+        ) * 0.01, "column monotonicity is violated"
 
         latency = all_transits - all_transits[:, 0][:, numpy.newaxis]
 
         # data_flow_bar_chart(static_path,dynamic_path, latency)
 
-        for i in range(len(dynamic_paths[0])):
-            m = latency[:, i].mean()
-            s = latency[:, i].std()
-            print(f"{m:,.0f} +/- {s:,.0f} (ms)")
-            print(frame_to_label(static_path[i]).replace("\\n", "\n"))
+        def label2(frame: StaticFrame) -> str:
+            return f"{get_plugin(frame)}-{frame.function_name}-{get_topic(frame)}"
+
+        for i in range(len(dynamic_paths[0]) - 1):
+            l = (latency[:, i+1] - latency[:, i])
+            print(f"{label2(dynamic_paths[0][i].static_frame)} -> {label2(dynamic_paths[0][i+1].static_frame)}: {l.mean():,.1f} +/- {l.std():,.1f} (ms)")
 
         end_latency = latency[:, -1]
         print(
-            f"Total latency (ms): {end_latency.mean():,.0f} +/- {end_latency.std():,.0f}, data[75%] = {numpy.percentile(end_latency, 75):,.0f}"
+            f"Total latency (ms): {end_latency.mean():,.1f} +/- {end_latency.std():,.1f}, data[25%] = {numpy.percentile(end_latency, 25):,.1f}, data[50%] = {numpy.percentile(end_latency, 50):,.1f}, data[75%] = {numpy.percentile(end_latency, 75):,.1f}"
         )
         duration = all_transits[0, -1] - all_transits[0, 0]
         period = all_transits[1:, -1] - all_transits[:-1, -1]
         print(
-            f"Period (ms): {period.mean():,.0f} +/- {period.std():,.0f}, min(data) = {period.min()}, data[50%] = {numpy.percentile(period, 50):,.0f}, data[75%] = {numpy.percentile(period, 75):,.0f}, data[95%] = {numpy.percentile(period, 95):,.0f}, data[99%] = {numpy.percentile(period, 99):,.0f}, max = {period.max()}"
+            f"Period (ms): {period.mean():,.1f} +/- {period.std():,.1f}, min(data) = {period.min()}, data[50%] = {numpy.percentile(period, 50):,.1f}, data[75%] = {numpy.percentile(period, 75):,.1f}, data[95%] = {numpy.percentile(period, 95):,.1f}, data[99%] = {numpy.percentile(period, 99):,.1f}, max = {period.max()}"
         )
         rt = all_transits[1:, -1] - all_transits[:-1, 0]
         print(
-            f"RT (ms): {rt.mean():,.0f} +/- {rt.std():,.0f}, min(data) = {rt.min()}, data[50%] = {numpy.percentile(rt, 50):,.0f}, data[75%] = {numpy.percentile(rt, 75):,.0f}, data[95%] = {numpy.percentile(rt, 95):,.0f}, data[99%] = {numpy.percentile(rt, 99):,.0f}, max = {rt.max()}"
+            f"RT (ms): {rt.mean():,.1f} +/- {rt.std():,.1f}, min(data) = {rt.min()}, data[50%] = {numpy.percentile(rt, 50):,.1f}, data[75%] = {numpy.percentile(rt, 75):,.1f}, data[95%] = {numpy.percentile(rt, 95):,.1f}, data[99%] = {numpy.percentile(rt, 99):,.1f}, max = {rt.max()}"
         )
         # print(numpy.mean(latency, axis=0))
         # print(numpy.std(latency, axis=0))

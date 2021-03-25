@@ -113,12 +113,14 @@ class DynamicFrame(anytree.NodeMixin):  # type: ignore
         children: Optional[Iterable[DynamicFrame]] = None,
     ) -> None:
         """Constructs a DynamicFrame. See anytree.NodeMixin for parent and children."""
+
+        is_custom_time = row["custom_time"] != 0
         self.thread_id = index[0]
         self._frame_id = index[1]
         self.cpu_time = row["cpu_stop"] - row["cpu_start"]
         self.wall_time = row["wall_stop"] - row["wall_start"]
-        self.wall_start = row["wall_start"]
-        self.wall_stop = row["wall_stop"]
+        self.wall_start = row["wall_start"] if not is_custom_time else row["custom_time"]
+        self.wall_stop = row["wall_stop"] if not is_custom_time else row["custom_time"]
         self.static_frame = static_frame
         self.serial_no = row["serial_no"]
         self.parent = parent
@@ -162,14 +164,15 @@ class CallTree:
         """
 
         with contextlib.closing(sqlite3.connect(database_url)) as conn:
-            frames = (
-                pandas.read_sql_query("SELECT * FROM finished;", conn).pipe(
-                    sort_and_set_index, ["thread_id", "frame"], verify_integrity=True
-                )
-                # sorting by values first helps the multiindex group data into levels
-                .pipe(to_categories, ["function_name", "topic_name"])
-                # Omitting "file_name"
-            )
+            frames = pandas.read_sql_query("SELECT * FROM finished;", conn)
+            index = frames[["thread_id", "frame"]]
+            dups = index.duplicated()
+            if dups.any():
+                print(index[dups])
+                import IPython; IPython.embed()
+            frames2 = sort_and_set_index(frames, ["thread_id", "frame"], verify_integrity=True)
+            frames3 = to_categories(frames2, ["function_name", "topic_name"])
+            frames = frames3
 
         calls = sum(frames["cpu_start"] != 0) + sum(frames["cpu_stop"] != 0)
 

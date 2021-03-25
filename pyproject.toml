@@ -24,6 +24,7 @@ pygraphviz = "^1.7"
 "charmonium.cache" = "^0.6.0"
 matplotlib = "^3.3.4"
 ipdb = "^0.13.6"
+dask = {extras = ["bag"], version = "^2021.3.0"}
 
 [tool.poetry.dev-dependencies]
 autoflake = "^1.4"

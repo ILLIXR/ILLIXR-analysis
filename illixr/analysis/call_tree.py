@@ -5,6 +5,7 @@ from __future__ import annotations
 import collections
 import contextlib
 import sqlite3
+import dask.bag
 from pathlib import Path
 from typing import (
     Any,
@@ -244,14 +245,10 @@ class CallTree:
         verify: bool = False,
     ) -> Mapping[int, _Class]:
         """Returns a forest constructed from each database in the dir."""
-        database_paths = list((metrics / "frames").iterdir())
-        trees = (
+        database_paths = dask.bag.from_sequence((metrics / "frames").iterdir())
+        def func (database_path):
             cls.from_database(str(database_path), verify)
-            for database_path in tqdm(
-                database_paths,
-                total=len(database_paths),
-                desc=f"Loading frames database {metrics!s}",
-                unit="thread",
-            )
+        trees = (
+            database_paths.map(func).compute()
         )
         return {tree.thread_id: tree for tree in trees if tree is not None}

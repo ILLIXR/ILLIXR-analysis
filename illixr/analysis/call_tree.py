@@ -246,8 +246,8 @@ class CallTree:
     ) -> Mapping[int, _Class]:
         """Returns a forest constructed from each database in the dir."""
         database_paths = dask.bag.from_sequence((metrics / "frames").iterdir())
-        def func (database_path):
-            cls.from_database(str(database_path), verify)
+        def func (database_path) -> Optional[_Class]:
+            return cls.from_database(str(database_path), verify)
         trees = (
             database_paths.map(func).compute()
         )

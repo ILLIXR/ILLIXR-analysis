@@ -32,6 +32,7 @@ from .util import clip
 
 def callgraph(trial: Trial) -> None:
     """Generate a visualization of the callgraph."""
+    print(len(trial.call_trees.values()))
     total_time = sum([tree.root.cpu_time for tree in trial.call_trees.values()])
     cpu_timer_calls = sum([tree.calls for tree in trial.call_trees.values()])
     cpu_timer_overhead = cpu_timer_calls * 400

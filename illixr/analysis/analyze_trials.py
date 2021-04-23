@@ -18,6 +18,7 @@ from typing import (
     Set,
     Tuple,
 )
+import warnings
 
 import anytree  # type: ignore
 import matplotlib.pyplot as plt
@@ -59,10 +60,11 @@ def callgraph(trial: Trial) -> None:
 
         for static_frame in anytree.PreOrderIter(tree.root.static_frame):
             node_weight = static_frame_time[static_frame] / total_time
-            if static_frame.function_name not in {"get", "put"}:
+            if True or static_frame.function_name not in {"get", "put"}:
+                topic = get_topic(static_frame)
                 graphviz.add_node(
                     id(static_frame),
-                    label=str(static_frame),
+                    label=str(static_frame) + f"\n{topic}" if topic else "",
                 )
                 if static_frame.parent is not None:
                     edge_weight = node_weight
@@ -95,7 +97,7 @@ def callgraph(trial: Trial) -> None:
                 )
                 plugin = get_plugin(static_frame)
                 print(
-                    f"{plugin} {static_frame.function_name} (us): {numpy.mean(times):,.0f} +/- {numpy.std(times):,.0f}, len(data) = {len(times)}, data[75%] < {numpy.percentile(times, 75):,.0f}, data[95%] < {numpy.percentile(times, 95):,.0f}"
+                    f"{plugin} ({tree.thread_id}) {static_frame.function_name} (us): {numpy.mean(times):,.0f} +/- {numpy.std(times):,.0f}, len(data) = {len(times)}, data[75%] < {numpy.percentile(times, 75):,.0f}, data[95%] < {numpy.percentile(times, 95):,.0f}"
                 )
     # if command_exists("feh"):
     #     subprocess.run(["feh", str(img_path)], check=True)
@@ -127,9 +129,9 @@ def data_flow_graph(trial: Trial) -> None:
     # Maps a dataitem (topic_name, serial_no) to its put.
     for tree in trial.call_trees.values():
         for frame in anytree.PreOrderIter(tree.root):
-            if frame.static_frame.function_name == "put":
+            if frame.static_frame.function_name == "put" and frame.static_frame.topic_name != "1_completion":
                 data_id = (frame.static_frame.topic_name, frame.serial_no)
-                assert data_id not in data_to_put
+                assert data_id not in data_to_put, f"{data_id}"
                 data_to_put[data_id] = frame
 
     # Add all async adges (put to get)
@@ -145,9 +147,8 @@ def data_flow_graph(trial: Trial) -> None:
                         topic_name=frame.static_frame.topic_name,
                         type=EdgeType.async_,
                     )
-                else:
-                    pass
-                    # print(f"get: {data_id} not found")
+                elif frame.serial_no != -1:
+                    warnings.warn(f"get: {data_id} not found", UserWarning)
 
     # Add all sync adges (put to callback)
     for tree in trial.call_trees.values():
@@ -156,7 +157,6 @@ def data_flow_graph(trial: Trial) -> None:
         topic_to_callback_count: Dict[str, int] = collections.defaultdict(lambda: 0)
         for frame in anytree.PreOrderIter(tree.root):
             if frame.static_frame.function_name == "callback":
-                assert len(topic_to_callback_count) < 2
                 topic_name = get_topic(frame.static_frame)
                 assert topic_name
                 callback_count = topic_to_callback_count[topic_name]
@@ -168,8 +168,7 @@ def data_flow_graph(trial: Trial) -> None:
                         put, frame, topic_name=topic_name, type=EdgeType.sync
                     )
                 else:
-                    pass
-                    # print(f"cb: {data_id} not found")
+                    warnings.warn(f"cb: {data_id} not found", UserWarning)
 
     static_dfg = nx.DiGraph()
     for src, dst, edge_attrs in dynamic_dfg.edges(data=True):
@@ -185,16 +184,17 @@ def data_flow_graph(trial: Trial) -> None:
     def frame_to_id(frame: StaticFrame) -> str:
         return str(id(frame))
 
-    def frame_to_label(frame: StaticFrame, function_name: Optional[str] = None) -> str:
+    def frame_to_label(frame: StaticFrame, function_name: Optional[str] = None, topic_name: Optional[str] = None) -> str:
         if frame.function_name in {"get", "put"}:
             assert frame.parent
-            return frame_to_label(frame.parent, frame.function_name)
+            assert function_name is None
+            return frame_to_label(frame.parent, frame.function_name, frame.topic_name)
         else:
             file_name = "/".join(frame.file_name.split("/")[-3:])
-            function_name = (
-                function_name if function_name is not None else frame.function_name
+            function_name = frame.function_name + " calling " + (
+                function_name if function_name is not None else ""
             )
-            topic_name = get_topic(frame)
+            topic_name = get_topic(frame) if topic_name is None else topic_name
             return f"{get_plugin(frame)} {function_name} {topic_name}\\n{file_name}:{frame.line}"
 
     include_program = True
@@ -227,6 +227,7 @@ def data_flow_graph(trial: Trial) -> None:
 
     # for plugin, nodes in plugin_to_nodes.items():
     #     static_dfg_graphviz.add_subgraph(map(frame_to_id, nodes), plugin, rank="same", rankdir="TB")
+        
 
     path_static_to_dynamic: Mapping[
         Tuple[StaticFrame, ...], List[Tuple[DynamicFrame, ...]]
@@ -240,6 +241,7 @@ def data_flow_graph(trial: Trial) -> None:
 
     dynamic_dfg_rev = dynamic_dfg.reverse()
 
+    srcs = set()
     def explore(
         dynamic_frame: DynamicFrame,
         static_path: Tuple[StaticFrame, ...],
@@ -251,6 +253,7 @@ def data_flow_graph(trial: Trial) -> None:
         dynamic_path += (dynamic_frame,)
         assert iter < 20
         if is_src(dynamic_frame.static_frame):
+            srcs.add(get_plugin(dynamic_frame.static_frame))
             yield (static_path, dynamic_path)
         for next_dynamic_frame in dynamic_dfg_rev[dynamic_frame]:
             if next_dynamic_frame.static_frame not in tabu:
@@ -273,16 +276,28 @@ def data_flow_graph(trial: Trial) -> None:
                             dynamic_path[::-1]
                         )
 
+    for static, dynamic in path_static_to_dynamic.items():
+        for src, dst in zip(static[:-1], static[1:]):
+            static_dfg_graphviz.get_edge(frame_to_id(src), frame_to_id(dst),).attr[
+                "label"
+            ] += " " + str(len(dynamic))
+
     def get_input_times(path: Iterable[DynamicFrame]) -> Iterable[int]:
         return (
             node.wall_start for node in path if node.static_frame.function_name == "put"
         )
 
+    for static_path, dynamic_paths in path_static_to_dynamic.items():
+        if "5" in set(map(get_plugin, static_path)):
+            print(len(dynamic_paths), tuple(map(get_plugin, static_path)))
+    print("look")
+
     path_static_to_dynamic = {
         static: dynamic
         for static, dynamic in path_static_to_dynamic.items()
-        if len(dynamic) > 250
+        if len(dynamic) > 20
     }
+
 
     path_static_to_dynamic_freshest: Mapping[
         Tuple[StaticFrame, ...], List[Tuple[DynamicFrame, ...]]
@@ -307,9 +322,6 @@ def data_flow_graph(trial: Trial) -> None:
                 frame_to_id(src),
                 frame_to_id(dst),
             ).attr["color"] = "blue"
-            # static_dfg_graphviz.get_edge(frame_to_id(src), frame_to_id(dst),).attr[
-            #     "label"
-            # ] += " " + str(len(instances))
 
     dot_path = Path(trial.output_dir / "dataflow.dot")
     img_path = trial.output_dir / "dataflow.png"
@@ -344,7 +356,7 @@ def data_flow_graph(trial: Trial) -> None:
 
         assert (all_transits[1:] - all_transits[:-1] < 0).sum() < len(
             all_transits
-        ) * 0.01, "row monotonicity is violated"
+        ) * 0.01, "row monotonicity is violated for"
 
         assert (all_transits[:, 1:] - all_transits[:, :-1] < 0).sum() < len(
             all_transits
@@ -409,9 +421,11 @@ def get_plugin(frame: StaticFrame) -> Optional[str]:
 
 def get_topic(frame: StaticFrame) -> Optional[str]:
     """Returns the topic of the plugin responsible for calling this static frame (if known). Else None."""
-    if not frame.topic_name and frame.parent is not None:
-        return get_topic(frame.parent)
+    if frame.function_name == "callback":
+        return get_topic(frame.parent.parent)
     else:
+        if frame.function_name in {"get", "put"}:
+            assert frame.topic_name is not None
         return frame.topic_name
 
 

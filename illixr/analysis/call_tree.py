@@ -82,6 +82,8 @@ class StaticFrame(anytree.NodeMixin):  # type: ignore
         self.plugin = falsy_to_none(cast(str, row["plugin"]))
         self.topic_name = falsy_to_none(cast(str, row["topic_name"]))
         self.parent = parent
+        if self.function_name in {"get", "put"}:
+            assert self.topic_name is not None
         if children:
             self.children = children
 

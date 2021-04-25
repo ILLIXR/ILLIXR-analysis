@@ -168,7 +168,7 @@ def data_flow_graph(trial: Trial) -> None:
                         put, frame, topic_name=topic_name, type=EdgeType.sync
                     )
                 else:
-                    warnings.warn(f"cb: {data_id} not found", UserWarning)
+                    warnings.warn(f"cb: {data_id} from {get_plugin(frame.static_frame)} not found", UserWarning)
 
     static_dfg = nx.DiGraph()
     for src, dst, edge_attrs in dynamic_dfg.edges(data=True):
@@ -184,18 +184,13 @@ def data_flow_graph(trial: Trial) -> None:
     def frame_to_id(frame: StaticFrame) -> str:
         return str(id(frame))
 
-    def frame_to_label(frame: StaticFrame, function_name: Optional[str] = None, topic_name: Optional[str] = None) -> str:
-        if frame.function_name in {"get", "put"}:
-            assert frame.parent
-            assert function_name is None
-            return frame_to_label(frame.parent, frame.function_name, frame.topic_name)
-        else:
-            file_name = "/".join(frame.file_name.split("/")[-3:])
-            function_name = frame.function_name + " calling " + (
-                function_name if function_name is not None else ""
-            )
-            topic_name = get_topic(frame) if topic_name is None else topic_name
-            return f"{get_plugin(frame)} {function_name} {topic_name}\\n{file_name}:{frame.line}"
+    def frame_to_label(frame: StaticFrame) -> str:
+        top = f"{get_plugin(frame)} {frame.function_name} {get_topic(frame)}"
+        stack = "\\n".join(
+            f"{'/'.join(frame.file_name.split('/')[-2:])}:{frame.line}:{frame.function_name}"
+            for frame in frame.path[2:]
+        )
+        return f"{top}\n{stack}"
 
     include_program = True
     # def frame_to_id(frame: StaticFrame) -> str:
@@ -251,7 +246,7 @@ def data_flow_graph(trial: Trial) -> None:
     ) -> Iterator[Tuple[Tuple[StaticFrame, ...], Tuple[DynamicFrame, ...]]]:
         static_path += (dynamic_frame.static_frame,)
         dynamic_path += (dynamic_frame,)
-        assert iter < 20
+        assert iter < 30
         if is_src(dynamic_frame.static_frame):
             srcs.add(get_plugin(dynamic_frame.static_frame))
             yield (static_path, dynamic_path)
@@ -295,7 +290,7 @@ def data_flow_graph(trial: Trial) -> None:
     path_static_to_dynamic = {
         static: dynamic
         for static, dynamic in path_static_to_dynamic.items()
-        if len(dynamic) > 20
+        if len(dynamic) > 250
     }
 
 
@@ -330,6 +325,8 @@ def data_flow_graph(trial: Trial) -> None:
 
     # assert len(path_static_to_dynamic) == 6
     for static_path, dynamic_paths in path_static_to_dynamic.items():
+        if static_path[-1].topic_name == "vsync":
+            continue
         print()
         print(
             len(dynamic_paths),
@@ -421,7 +418,7 @@ def get_plugin(frame: StaticFrame) -> Optional[str]:
 
 def get_topic(frame: StaticFrame) -> Optional[str]:
     """Returns the topic of the plugin responsible for calling this static frame (if known). Else None."""
-    if frame.function_name == "callback":
+    if frame.function_name == "callback" and frame.topic_name is None:
         return get_topic(frame.parent.parent)
     else:
         if frame.function_name in {"get", "put"}:

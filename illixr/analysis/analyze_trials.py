@@ -97,7 +97,7 @@ def callgraph(trial: Trial) -> None:
                 )
                 plugin = get_plugin(static_frame)
                 print(
-                    f"{plugin} ({tree.thread_id}) {static_frame.function_name} (us): {numpy.mean(times):,.0f} +/- {numpy.std(times):,.0f}, len(data) = {len(times)}, data[75%] < {numpy.percentile(times, 75):,.0f}, data[95%] < {numpy.percentile(times, 95):,.0f}"
+                    f"{plugin} ({tree.thread_id}) {static_frame.function_name} (us): {numpy.mean(times):,.0f} +/- {numpy.std(times):,.0f}, len(data) = {len(times)}, data[75%] < {numpy.percentile(times, 75):,.0f}, data[90%] < {numpy.percentile(times, 90):,.0f}, data[95%] < {numpy.percentile(times, 95):,.0f}"
                 )
     # if command_exists("feh"):
     #     subprocess.run(["feh", str(img_path)], check=True)
@@ -368,7 +368,7 @@ def data_flow_graph(trial: Trial) -> None:
 
         for i in range(len(dynamic_paths[0]) - 1):
             l = (latency[:, i+1] - latency[:, i])
-            print(f"{label2(dynamic_paths[0][i].static_frame)} -> {label2(dynamic_paths[0][i+1].static_frame)}: {l.mean():,.1f} +/- {l.std():,.1f} (ms)")
+            print(f"{label2(dynamic_paths[0][i].static_frame)} -> {label2(dynamic_paths[0][i+1].static_frame)}: {l.mean():,.1f} +/- {l.std():,.1f} data[50%] = {numpy.percentile(l, 50):.1f} (ms)")
 
         end_latency = latency[:, -1]
         print(
@@ -385,6 +385,22 @@ def data_flow_graph(trial: Trial) -> None:
         )
         # print(numpy.mean(latency, axis=0))
         # print(numpy.std(latency, axis=0))
+
+    ccs = [
+        static_path
+        for static_path in path_static_to_dynamic.keys()
+        if all(get_plugin(frame) in {"7", "3", "6"} for frame in static_path) and static_path[-1].topic_name != "vsync"
+    ]
+    assert len(ccs) == 1
+    cc = ccs[0]
+    data = [path[5].wall_start - path[4].wall_start for path in path_static_to_dynamic[cc]]
+    import matplotlib
+    matplotlib.use('qt5agg')
+    plt.ion()
+    plt.xlabel("frame (count)", fontsize=20)
+    plt.ylabel("latency int -> tw (ns)", fontsize=20)
+    plt.plot(range(len(data)), data, "ro-")
+    plt.show(block=True)
 
 
 def data_flow_bar_chart(static_path, dynamic_paths, latencies) -> None:

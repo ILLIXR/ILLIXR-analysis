@@ -33,11 +33,11 @@ from .util import clip
 
 def callgraph(trial: Trial) -> None:
     """Generate a visualization of the callgraph."""
-    print(len(trial.call_trees.values()))
+    print(f"threads: {len(trial.call_trees)}")
     total_time = sum([tree.root.cpu_time for tree in trial.call_trees.values()])
     cpu_timer_calls = sum([tree.calls for tree in trial.call_trees.values()])
     cpu_timer_overhead = cpu_timer_calls * 400
-    print(cpu_timer_overhead, total_time, cpu_timer_overhead / total_time if total_time != 0 else "NaN")
+    print(f"cpu overhead estimate: {cpu_timer_overhead / 1e6:.1f}ms, total_time: {total_time / 1e6:.1f}ms, percent error: {cpu_timer_overhead / total_time * 100 if total_time != 0 else 0:.1f}%")
     graphviz = pygraphviz.AGraph(strict=True, directed=True)
     for tree in trial.call_trees.values():
         static_frame_time: Dict[StaticFrame, float] = collections.defaultdict(lambda: 0)
@@ -97,7 +97,7 @@ def callgraph(trial: Trial) -> None:
                 )
                 plugin = get_plugin(static_frame)
                 print(
-                    f"{plugin} ({tree.thread_id}) {static_frame.function_name} (us): {numpy.mean(times):,.0f} +/- {numpy.std(times):,.0f}, len(data) = {len(times)}, data[75%] < {numpy.percentile(times, 75):,.0f}, data[90%] < {numpy.percentile(times, 90):,.0f}, data[95%] < {numpy.percentile(times, 95):,.0f}"
+                    f"{plugin} ({tree.thread_id}) {static_frame.function_name} (us): {numpy.mean(times):,.0f} +/- {numpy.std(times):,.0f}, len(data) = {len(times)}, data[75%] < {numpy.percentile(times, 75):,.0f}, data[90%] < {numpy.percentile(times, 90):,.0f}, data[95%] < {numpy.percentile(times, 95):,.0f}, data[99%] < {numpy.percentile(times, 99):,.0f} data < {numpy.max(times):,.0f}"
                 )
     # if command_exists("feh"):
     #     subprocess.run(["feh", str(img_path)], check=True)
@@ -282,11 +282,6 @@ def data_flow_graph(trial: Trial) -> None:
             node.wall_start for node in path if node.static_frame.function_name == "put"
         )
 
-    for static_path, dynamic_paths in path_static_to_dynamic.items():
-        if "5" in set(map(get_plugin, static_path)):
-            print(len(dynamic_paths), tuple(map(get_plugin, static_path)))
-    print("look")
-
     path_static_to_dynamic = {
         static: dynamic
         for static, dynamic in path_static_to_dynamic.items()
@@ -325,7 +320,7 @@ def data_flow_graph(trial: Trial) -> None:
 
     # assert len(path_static_to_dynamic) == 6
     for static_path, dynamic_paths in path_static_to_dynamic.items():
-        if static_path[-1].topic_name == "vsync":
+        if static_path[-1].topic_name != "vsync":
             continue
         print()
         print(
@@ -377,12 +372,17 @@ def data_flow_graph(trial: Trial) -> None:
         duration = all_transits[0, -1] - all_transits[0, 0]
         period = all_transits[1:, -1] - all_transits[:-1, -1]
         print(
-            f"Period (ms): {period.mean():,.1f} +/- {period.std():,.1f}, min(data) = {period.min()}, data[50%] = {numpy.percentile(period, 50):,.1f}, data[75%] = {numpy.percentile(period, 75):,.1f}, data[95%] = {numpy.percentile(period, 95):,.1f}, data[99%] = {numpy.percentile(period, 99):,.1f}, max = {period.max()}"
+            f"Period (ms): {period.mean():,.1f} +/- {period.std():,.1f}, min(data) = {period.min():.1f}, data[50%] = {numpy.percentile(period, 50):,.1f}, data[75%] = {numpy.percentile(period, 75):,.1f}, data[95%] = {numpy.percentile(period, 95):,.1f}, data[99%] = {numpy.percentile(period, 99):,.1f}, max = {period.max():.1f}"
         )
         rt = all_transits[1:, -1] - all_transits[:-1, 0]
         print(
-            f"RT (ms): {rt.mean():,.1f} +/- {rt.std():,.1f}, min(data) = {rt.min()}, data[50%] = {numpy.percentile(rt, 50):,.1f}, data[75%] = {numpy.percentile(rt, 75):,.1f}, data[95%] = {numpy.percentile(rt, 95):,.1f}, data[99%] = {numpy.percentile(rt, 99):,.1f}, max = {rt.max()}"
+            f"RT (ms): {rt.mean():,.1f} +/- {rt.std():,.1f}, min(data) = {rt.min():.1f}, data[50%] = {numpy.percentile(rt, 50):,.1f}, data[75%] = {numpy.percentile(rt, 75):,.1f}, data[95%] = {numpy.percentile(rt, 95):,.1f}, data[99%] = {numpy.percentile(rt, 99):,.1f}, max = {rt.max():.1f}"
         )
+        print(f"""
+{end_latency.mean():.1f} +/- {end_latency.std():.1f} ({numpy.median(end_latency):.1f})
+{period.mean():.1f} +/- {period.std():.1f} ({numpy.median(period):.1f})
+{rt.mean():.1f} +/- {rt.std():.1f} ({numpy.median(rt):.1f})
+""".strip())
         # print(numpy.mean(latency, axis=0))
         # print(numpy.std(latency, axis=0))
 
@@ -393,13 +393,15 @@ def data_flow_graph(trial: Trial) -> None:
     ]
     assert len(ccs) == 1
     cc = ccs[0]
-    data = [path[5].wall_start - path[4].wall_start for path in path_static_to_dynamic[cc]]
+    latency = numpy.array([path[5].wall_start - path[4].wall_start for path in path_static_to_dynamic[cc]])
+    period = numpy.array([path[-1].wall_start - prev_path[-1].wall_start for prev_path, path in zip(path_static_to_dynamic[cc][:-1], path_static_to_dynamic[cc][1:])]) / 1e6
+    ts = (numpy.array([path[0].wall_start for path in path_static_to_dynamic[cc]]) - path_static_to_dynamic[cc][0][0].wall_start) / 1e6
     import matplotlib
     matplotlib.use('qt5agg')
     plt.ion()
-    plt.xlabel("frame (count)", fontsize=20)
-    plt.ylabel("latency int -> tw (ns)", fontsize=20)
-    plt.plot(range(len(data)), data, "ro-")
+    plt.xlabel("time (ms)", fontsize=20)
+    plt.ylabel("period (ms)", fontsize=20)
+    plt.plot(ts, latency, "ro-")
     plt.show(block=True)
 
 

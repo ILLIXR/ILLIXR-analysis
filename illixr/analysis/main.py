@@ -7,12 +7,14 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
+import shutil
 from typing import List, Union
 
 import typer
 
 from .analyze_trials import analyze_trials
-from .read_trials import read_trials
+from .types import Trials
+from .read_trials import read_trial
 from .util import command_exists
 
 app = typer.Typer()
@@ -20,14 +22,23 @@ app = typer.Typer()
 # See https://clig.dev/ for guidelines
 @app.command()
 def main(
-    data_dir: Path,
+    data_dirs: Path,
     verify: bool = typer.Option(
         False, "--verify", help="Preform extra checks on the data"
     ),
 ) -> None:
     """Runs every analysis on every trial."""
-    trials = read_trials([data_dir], verify)
-    analyze_trials(trials)
+    output_dir = Path("output/")
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir()
+    analyze_trials(Trials(
+        each=[
+            read_trial(data_dir, verify)
+            for data_dir in data_dirs.iterdir()
+        ],
+        output_dir=output_dir,
+    ))
 
 
 @app.command()

@@ -49,25 +49,20 @@ class StaticFrame(anytree.NodeMixin):  # type: ignore
     function_name: str
     file_name: str
     line: int
-    plugin: Optional[str]
-    topic_name: Optional[str]
+    _plugin: Optional[str]
+    _topic_name: Optional[str]
 
-    def __str__(self) -> str:
-        """Human-readable string representation"""
-        ret = f"{self.function_name}"
-        if self.function_name == "":
-            ret += "thread"
-        if self.plugin:
-            ret += f"\nplugin {self.plugin}"
-        # if self._topic_name:
-        #     ret += f", on {self._topic_name}"
-        return ret
+    def plugin_function(self, sep: str = "\n") -> str:
+        plugin_str = self.plugin + sep if self.plugin else ""
+        return f"{plugin_str}{self.function_name}"
 
-    def __repr__(self) -> str:
-        ancestors = "->".join(
-            f"{node.file_name}:{node.line}:{node.function_name}" for node in self.path
-        )
-        return f"{ancestors}->{self.file_name}:{self.line}:{self.function_name} {self.plugin=} {self.topic_name=}"
+    def plugin_function_topic(self, sep: str="\n") -> str:
+        plugin_str = self.plugin + sep if self.plugin else ""
+        topic_str = sep + self.topic_name if self.topic_name else ""
+        return f"{plugin_str}{self.function_name}{topic_str}"
+
+    def file_function_line(self, sep: str=":") -> str:
+        f"{self.file_name}{sep}{self.line}{sep}{self.function_name}"
 
     def __init__(
         self,
@@ -77,16 +72,39 @@ class StaticFrame(anytree.NodeMixin):  # type: ignore
     ) -> None:
         """Constructs a StaticFrame. See anytree.NodeMixin for parent and children."""
         self.function_name = cast(str, row["function_name"])
-        self.file_name = cast(str, row["file_name"])
+        self._file_name = cast(str, row["file_name"])
         self.line = cast(int, row["line"])
-        self.plugin = falsy_to_none(cast(str, row["plugin"]))
-        self.topic_name = falsy_to_none(cast(str, row["topic_name"]))
+        self._plugin = falsy_to_none(cast(str, row["plugin"]))
+        self._topic_name = falsy_to_none(cast(str, row["topic_name"]))
         self.parent = parent
         if self.function_name in {"get", "put"}:
             assert self.topic_name is not None
         if children:
             self.children = children
 
+    @property
+    def plugin(self) -> Optional[str]:
+        """Returns the name of the plugin responsible for calling this static frame.."""
+        if self._plugin is None:
+            if self.parent is not None:
+                self._plugin = self.parent.plugin
+            else:
+                self._plugin = None
+        return self._plugin
+
+    @property
+    def topic_name(self) -> str:
+        """Returns the topic of the plugin responsible for calling this static frame."""
+        if self._topic_name is None:
+            if self.function_name == "callback":
+                self._topic_name = self.parent.parent.topic_name
+            else:
+                self._topic_name = None
+        return self._topic_name
+
+    @property
+    def file_name(self) -> str:
+        return "/".join(self._file_name.split('/')[-2:])
 
 class DynamicFrame(anytree.NodeMixin):  # type: ignore
     """A dynamic stack frame."""

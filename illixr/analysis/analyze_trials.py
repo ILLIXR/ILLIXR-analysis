@@ -7,6 +7,7 @@ import collections
 import random
 from enum import Enum
 from pathlib import Path
+import shutil
 from typing import (
     Callable,
     Dict,
@@ -17,21 +18,40 @@ from typing import (
     Optional,
     Set,
     Tuple,
+    TypeVar,
+    Union,
 )
 import warnings
+import itertools
+import io
 
 import anytree  # type: ignore
 import matplotlib.pyplot as plt
 import networkx as nx  # type: ignore
-import numpy
+import numpy as np
 import pygraphviz  # type: ignore
+import pandas as pd  # type: ignore
+from frozendict import frozendict
+import charmonium.time_block as ch_time_block
+from tqdm import tqdm
 
 from .call_tree import DynamicFrame, StaticFrame
-from .types import Trial, Trials
+from .types import Trial, Trials, conditions2label
 from .util import clip
 
 
-def callgraph(trial: Trial) -> None:
+
+def print_distribution(data: np.array, digits: int = 1) -> str:
+    percentiles = [25, 75, 90, 95]
+    percentiles_str = " " + " ".join(
+        f"[{percentile}%]={np.percentile(data, percentile):,.{digits}f}"
+        for percentile in percentiles
+    )
+    return f"{data.mean():,.{digits}f} +/- {data.std():,.{digits}f} ({data.std() / data.mean() * 100:.0f}%) med={np.median(data):,.{digits}f} count={len(data)}{percentiles_str}"
+
+
+@ch_time_block.decor()
+def plot_callgraph(trial: Trial) -> None:
     """Generate a visualization of the callgraph."""
     print(f"threads: {len(trial.call_trees)}")
     total_time = sum([tree.root.cpu_time for tree in trial.call_trees.values()])
@@ -61,10 +81,9 @@ def callgraph(trial: Trial) -> None:
         for static_frame in anytree.PreOrderIter(tree.root.static_frame):
             node_weight = static_frame_time[static_frame] / total_time
             if True or static_frame.function_name not in {"get", "put"}:
-                topic = get_topic(static_frame)
                 graphviz.add_node(
                     id(static_frame),
-                    label=str(static_frame) + f"\n{topic}" if topic else "",
+                    label=static_frame.plugin_function_topic(),
                 )
                 if static_frame.parent is not None:
                     edge_weight = node_weight
@@ -79,39 +98,62 @@ def callgraph(trial: Trial) -> None:
     graphviz.write(dot_path)
     graphviz.draw(img_path, prog="dot")
 
+def gen_compute_times(trial: Trial) -> None:
+    top_level_fn_names = {
+        "callback",
+        "cam",
+        "IMU",
+        "load_camera_data",
+        "_p_one_iteration",
+    }
+    trial.output["compute_times"] = {}
     for tree in trial.call_trees.values():
         for static_frame in anytree.PreOrderIter(tree.root.static_frame):
-            if static_frame.function_name in {
-                "_p_one_iteration",
-                "callback",
-                "cam",
-                "IMU",
-                "load_camera_data",
-            }:
+            fn_name_good = static_frame.function_name in top_level_fn_names or static_frame.function_name.startswith("_")
+            plugin_name_good = static_frame.plugin != "1" or not trial.config["conditions"]["scheduler"] in {"static", "dynamic"}
+            if fn_name_good and plugin_name_good:
                 dynamic_frames = tree.static_to_dynamic[static_frame]
-                times = (
-                    numpy.array(
-                        [dynamic_frame.cpu_time for dynamic_frame in dynamic_frames]
-                    )
-                    / 1e3
-                )
-                plugin = get_plugin(static_frame)
-                print(
-                    f"{plugin} ({tree.thread_id}) {static_frame.function_name} (us): {numpy.mean(times):,.0f} +/- {numpy.std(times):,.0f}, len(data) = {len(times)}, data[75%] < {numpy.percentile(times, 75):,.0f}, data[90%] < {numpy.percentile(times, 90):,.0f}, data[95%] < {numpy.percentile(times, 95):,.0f}, data[99%] < {numpy.percentile(times, 99):,.0f} data < {numpy.max(times):,.0f}"
-                )
-    # if command_exists("feh"):
-    #     subprocess.run(["feh", str(img_path)], check=True)
+                times = np.array([dynamic_frame.cpu_time for dynamic_frame in dynamic_frames])
+                ts = np.array([dynamic_frame.wall_start for dynamic_frame in dynamic_frames])
+                trial.output["compute_times"][static_frame] = ts, times, tree.thread_id
 
+@ch_time_block.decor()
+def plot_compute_times(trial: Trial) -> None:
+    compute_dir = trial.output_dir / "compute_times"
+    write_contents({
+        compute_dir / "compute_times.txt": "\n".join(map(second, sorted([
+            (frame.plugin, f"{frame.plugin_function(' ')} TID={tid}: {print_distribution(times / 1e6, digits=2)}")
+            for frame, (_, times, tid) in trial.output["compute_times"].items()
+        ]))),
+        **{
+            compute_dir / "hist" / f"{frame.plugin_function(' ')}.png": histogram(
+                ys=times / 1e6,
+                xlabel=f"CPU Time (ms)",
+                title=f"Compute Time of {frame.plugin_function(' ')}"
+            )
+            for frame, (_, times, _) in trial.output["compute_times"].items()
+        },
+        **{
+            compute_dir / "ts" / f"{frame.plugin_function(' ')}.png": timeseries(
+                ts=ts,
+                ys=times / 1e6,
+                ylabel=f"CPU Time (ms)",
+                title=f"Compute Time of {frame.plugin_function(' ')}"
+            )
+            for frame, (ts, times, _) in trial.output["compute_times"].items()
+        },
+    })
 
-def data_flow_graph(trial: Trial) -> None:
+class EdgeType(Enum):
+    program = 1
+    async_ = 2
+    sync = 3
+
+@ch_time_block.decor()
+def gen_dfg(trial: Trial) -> None:
     """Generates a visualization of dataflow over Switchboard between plugins."""
 
-    class EdgeType(Enum):
-        program = 1
-        async_ = 2
-        sync = 3
-
-    dynamic_dfg = nx.DiGraph()
+    trial.output["dynamic_dfg"] = nx.DiGraph()
 
     # Add all program edges
     for tree in trial.call_trees.values():
@@ -119,7 +161,7 @@ def data_flow_graph(trial: Trial) -> None:
         for frame in anytree.PreOrderIter(tree.root):
             if frame.static_frame.function_name in {"put", "get", "callback", "entry", "exit"}:
                 if last_comm is not None:
-                    dynamic_dfg.add_edge(
+                    trial.output["dynamic_dfg"].add_edge(
                         last_comm, frame, topic_name=None, type=EdgeType.program
                     )
                 last_comm = frame
@@ -141,7 +183,7 @@ def data_flow_graph(trial: Trial) -> None:
                 data_id = (frame.static_frame.topic_name, frame.serial_no)
                 put = data_to_put.get(data_id, None)
                 if put is not None:
-                    dynamic_dfg.add_edge(
+                    trial.output["dynamic_dfg"].add_edge(
                         put,
                         frame,
                         topic_name=frame.static_frame.topic_name,
@@ -157,26 +199,29 @@ def data_flow_graph(trial: Trial) -> None:
         topic_to_callback_count: Dict[str, int] = collections.defaultdict(lambda: 0)
         for frame in anytree.PreOrderIter(tree.root):
             if frame.static_frame.function_name == "callback":
-                topic_name = get_topic(frame.static_frame)
+                topic_name = frame.static_frame.topic_name
                 assert topic_name
                 callback_count = topic_to_callback_count[topic_name]
                 topic_to_callback_count[topic_name] += 1
                 data_id = (topic_name, callback_count)
                 put = data_to_put.get(data_id, None)
                 if put is not None:
-                    dynamic_dfg.add_edge(
+                    trial.output["dynamic_dfg"].add_edge(
                         put, frame, topic_name=topic_name, type=EdgeType.sync
                     )
                 else:
-                    warnings.warn(f"cb: {data_id} from {get_plugin(frame.static_frame)} not found", UserWarning)
+                    warnings.warn(f"cb: {data_id} from {frame.static_frame.plugin} not found", UserWarning)
 
-    static_dfg = nx.DiGraph()
-    for src, dst, edge_attrs in dynamic_dfg.edges(data=True):
-        static_dfg.add_edge(
+    trial.output["static_dfg"] = nx.DiGraph()
+    for src, dst, edge_attrs in trial.output["dynamic_dfg"].edges(data=True):
+        trial.output["static_dfg"].add_edge(
             src.static_frame,
             dst.static_frame,
             **edge_attrs,
         )
+
+@ch_time_block.decor()
+def plot_dfg(trial: Trial) -> None:
 
     plugin_to_nodes: Dict[str, List[StaticFrame]] = collections.defaultdict(list)
     static_dfg_graphviz = pygraphviz.AGraph(strict=True, directed=True)
@@ -185,22 +230,12 @@ def data_flow_graph(trial: Trial) -> None:
         return str(id(frame))
 
     def frame_to_label(frame: StaticFrame) -> str:
-        top = f"{get_plugin(frame)} {frame.function_name} {get_topic(frame)}"
-        stack = "\\n".join(
-            f"{'/'.join(frame.file_name.split('/')[-2:])}:{frame.line}:{frame.function_name}"
-            for frame in frame.path[2:]
-        )
+        top = f"frame.plugin_function_topic(' ')"
+        stack = "\\n".join(str(frame.file_function_line()) for frame in frame.path[2:])
         return f"{top}\n{stack}"
 
     include_program = True
-    # def frame_to_id(frame: StaticFrame) -> str:
-    #     return str(get_plugin(frame))
-
-    # def frame_to_label(frame: StaticFrame) -> str:
-    #     return str(get_plugin(frame))
-
-    # include_program = False
-    for src, dst, edge_attrs in static_dfg.edges(data=True):
+    for src, dst, edge_attrs in trial.output["static_dfg"].edges(data=True):
         if include_program or edge_attrs["type"] != EdgeType.program:
             static_dfg_graphviz.add_edge(
                 frame_to_id(src),
@@ -213,9 +248,8 @@ def data_flow_graph(trial: Trial) -> None:
                 }[edge_attrs["type"]],
             )
             for node in [src, dst]:
-                plugin = get_plugin(node)
                 # assert plugin
-                plugin_to_nodes[plugin].append(node)
+                plugin_to_nodes[node.plugin].append(node)
                 static_dfg_graphviz.get_node(frame_to_id(node)).attr[
                     "label"
                 ] = frame_to_label(node)
@@ -223,7 +257,27 @@ def data_flow_graph(trial: Trial) -> None:
     # for plugin, nodes in plugin_to_nodes.items():
     #     static_dfg_graphviz.add_subgraph(map(frame_to_id, nodes), plugin, rank="same", rankdir="TB")
         
+    # for static, dynamic in path_static_to_dynamic.items():
+    #     for src, dst in zip(static[:-1], static[1:]):
+    #         static_dfg_graphviz.get_edge(frame_to_id(src), frame_to_id(dst),).attr[
+    #             "label"
+    #         ] += " " + str(len(dynamic))
 
+    # for path, instances in path_static_to_dynamic.items():
+    #     for src, dst in zip(path[:-1], path[1:]):
+    #         static_dfg_graphviz.get_edge(
+    #             frame_to_id(src),
+    #             frame_to_id(dst),
+    #         ).attr["color"] = "blue"
+
+    dot_path = Path(trial.output_dir / "dataflow.dot")
+    img_path = trial.output_dir / "dataflow.png"
+    static_dfg_graphviz.write(dot_path)
+    static_dfg_graphviz.draw(img_path, prog="dot")
+
+
+@ch_time_block.decor()
+def gen_paths(trial: Trial) -> None:
     path_static_to_dynamic: Mapping[
         Tuple[StaticFrame, ...], List[Tuple[DynamicFrame, ...]]
     ] = collections.defaultdict(list)
@@ -234,7 +288,7 @@ def data_flow_graph(trial: Trial) -> None:
     def is_src(static_frame: StaticFrame) -> bool:
         return static_frame.function_name == "entry"
 
-    dynamic_dfg_rev = dynamic_dfg.reverse()
+    dynamic_dfg_rev = trial.output["dynamic_dfg"].reverse()
 
     srcs = set()
     def explore(
@@ -248,7 +302,7 @@ def data_flow_graph(trial: Trial) -> None:
         dynamic_path += (dynamic_frame,)
         assert iter < 30
         if is_src(dynamic_frame.static_frame):
-            srcs.add(get_plugin(dynamic_frame.static_frame))
+            srcs.add(dynamic_frame.static_frame.plugin)
             yield (static_path, dynamic_path)
         for next_dynamic_frame in dynamic_dfg_rev[dynamic_frame]:
             if next_dynamic_frame.static_frame not in tabu:
@@ -260,7 +314,7 @@ def data_flow_graph(trial: Trial) -> None:
                     iter + 1,
                 )
 
-    for static_dst in static_dfg:
+    for static_dst in trial.output["static_dfg"]:
         if is_dst(static_dst):
             for call_tree in trial.call_trees.values():
                 for dynamic_dst in call_tree.static_to_dynamic[static_dst]:
@@ -271,12 +325,6 @@ def data_flow_graph(trial: Trial) -> None:
                             dynamic_path[::-1]
                         )
 
-    for static, dynamic in path_static_to_dynamic.items():
-        for src, dst in zip(static[:-1], static[1:]):
-            static_dfg_graphviz.get_edge(frame_to_id(src), frame_to_id(dst),).attr[
-                "label"
-            ] += " " + str(len(dynamic))
-
     def get_input_times(path: Iterable[DynamicFrame]) -> Iterable[int]:
         return (
             node.wall_start for node in path if node.static_frame.function_name == "put"
@@ -285,7 +333,7 @@ def data_flow_graph(trial: Trial) -> None:
     path_static_to_dynamic = {
         static: dynamic
         for static, dynamic in path_static_to_dynamic.items()
-        if len(dynamic) > 250
+        if len(dynamic) > 80
     }
 
 
@@ -306,104 +354,337 @@ def data_flow_graph(trial: Trial) -> None:
 
     # TODO: compute how many puts are "used/ignored"
 
-    for path, instances in path_static_to_dynamic.items():
-        for src, dst in zip(path[:-1], path[1:]):
-            static_dfg_graphviz.get_edge(
-                frame_to_id(src),
-                frame_to_id(dst),
-            ).attr["color"] = "blue"
+    def path_signature(path: Iterable[StaticFrame]) -> Tuple[int]:
+        return tuple(int(frame.plugin) for frame in path)
 
-    dot_path = Path(trial.output_dir / "dataflow.dot")
-    img_path = trial.output_dir / "dataflow.png"
-    static_dfg_graphviz.write(dot_path)
-    static_dfg_graphviz.draw(img_path, prog="dot")
+    def find_path(paths: Iterable[Tuple[StaticFrame, ...]], signature: Tuple[int, ...]) -> Tuple[StaticFrame, ...]:
+        for path in paths:
+            if path_signature(path) == signature:
+                return path
+        print(f"{signature} is not found.")
+        for path in paths:
+            print(path_signature(path))
+        raise KeyError()
 
-    # assert len(path_static_to_dynamic) == 6
-    for static_path, dynamic_paths in path_static_to_dynamic.items():
-        if static_path[-1].topic_name != "vsync":
-            continue
-        print()
-        print(
-            len(dynamic_paths),
-            " -> ".join(f"{get_plugin(frame)}" for frame in static_path),
-        )
-        all_transits = (
-            numpy.array(
+    important_path_signatures: Mapping[str, List[int]] = {
+        "CC":     (7,) * 2 +            (3,) * 3 +            (6,) * 4,
+        "Render": (7,) * 2 +            (3,) * 3 + (5,) * 2 + (6,) * 6,
+        "Cam":    (8,) * 2 + (2,) * 3 + (3,) * 2 +            (6,) * 4,
+    }
+
+    trial.output["important_paths"] = {
+        name: find_path(path_static_to_dynamic.keys(), path_signature)
+        for name, path_signature in important_path_signatures.items()
+     }
+
+    trial.output["path_static_to_dynamic"] = path_static_to_dynamic
+
+def gen_path_times(trial: Trial) -> None:
+    trial.output["path_times"] = {}
+    for static_path, dynamic_paths in trial.output["path_static_to_dynamic"].items():
+        data = (
+            np.array(
                 list(
                     [node.wall_start for node in dynamic_path]
                     + [dynamic_path[-1].wall_stop]
                     for dynamic_path in dynamic_paths
                 )
             )
-            / 1e6
         )
 
-        import pandas as pd  # type: ignore
-
-        df = pd.DataFrame(all_transits)
-        df.columns = [get_plugin(node.static_frame) for node in dynamic_paths[0]] + [
-            "end"
-        ]
-        df.to_csv("all_transits.csv")
-
-        assert (all_transits[1:] - all_transits[:-1] < 0).sum() < len(
-            all_transits
+        assert (data[1:] - data[:-1] < 0).sum() < len(
+            data
         ) * 0.01, "row monotonicity is violated for"
 
-        assert (all_transits[:, 1:] - all_transits[:, :-1] < 0).sum() < len(
-            all_transits
+        assert (data[:, 1:] - data[:, :-1] < 0).sum() < len(
+            data
         ) * 0.01, "column monotonicity is violated"
 
-        latency = all_transits - all_transits[:, 0][:, numpy.newaxis]
+        trial.output["path_times"][static_path] = {
+            "times": data,
+            "rel_time": data - data[:, 0][:, np.newaxis],
+            "latency": data[:, -1] - data[:, 0],
+            "period": data[1:, -1] - data[:-1, -1],
+            "rt": data[1:, -1] - data[:-1, 0],
+        }
 
-        # data_flow_bar_chart(static_path,dynamic_path, latency)
+Key = TypeVar("Key")
+Val = TypeVar("Val")
+def dict_concat(dicts: Iterable[Mapping[Key, Val]]) -> Mapping[Key, Val]:
+    return {
+        key: val
+        for dict in dicts
+        for key, val in dict.items()
+    }
 
-        def label2(frame: StaticFrame) -> str:
-            return f"{get_plugin(frame)}-{frame.function_name}-{get_topic(frame)}"
+all_metrics = ["latency", "period", "rt"]
 
-        for i in range(len(dynamic_paths[0]) - 1):
-            l = (latency[:, i+1] - latency[:, i])
-            print(f"{label2(dynamic_paths[0][i].static_frame)} -> {label2(dynamic_paths[0][i+1].static_frame)}: {l.mean():,.1f} +/- {l.std():,.1f} data[50%] = {numpy.percentile(l, 50):.1f} (ms)")
+@ch_time_block.decor()
+def plot_paths(trial: Trial) -> None:
+    def summarize(static_path: tuple[StaticFrame, ...]) -> str:
+        dynamic_paths = trial.output["path_static_to_dynamic"][static_path]
+        data = trial.output["path_times"][static_path]
+        def link_str(i: int) -> str:
+            frame_start = dynamic_paths[0][i].static_frame.plugin_function_topic("-")
+            frame_end = dynamic_paths[0][i+1].static_frame.plugin_function_topic("-")
+            label = f"{frame_start} -> {frame_end} (ms) "
+            padding = max(0, 60 - len(label)) * " "
+            numbers = print_distribution((data["rel_time"][:, i+1] - data["rel_time"][:, i]) / 1e6)
+            return label + padding + numbers
+        return "\n".join([
+            f"{len(dynamic_paths)}" + " -> ".join(frame.plugin for frame in static_path),
+            "\n".join(link_str(i) for i in range(len(dynamic_paths[0]) - 1)),
+            "\n".join(f"{print_distribution(data[metric] / 1e6)}" for metric in all_metrics),
+        ])
 
-        end_latency = latency[:, -1]
-        print(
-            f"Total latency (ms): {end_latency.mean():,.1f} +/- {end_latency.std():,.1f}, data[25%] = {numpy.percentile(end_latency, 25):,.1f}, data[50%] = {numpy.percentile(end_latency, 50):,.1f}, data[75%] = {numpy.percentile(end_latency, 75):,.1f}"
+    chains_dir = trial.output_dir / "chains"
+    write_contents({
+        **{
+            chains_dir / f"{name}.txt": summarize(static_path)
+            for name, static_path in trial.output["important_paths"].items()
+        },
+        **dict_concat(
+            {
+                chains_dir / name / "hist"/ f"{metric}.png": histogram(
+                    ys=trial.output["path_times"][static_path][metric] / 1e6,
+                    xlabel=f"{metric} (ms)",
+                    title=f"{metric.capitalize()} of {name}",
+                )
+                for name, static_path in trial.output["important_paths"].items()
+            }
+            for metric in all_metrics
+        ),
+        **dict_concat(
+            {
+                chains_dir / name / "ts"/ f"{metric}.png": timeseries(
+                    ts=trial.output["path_times"][static_path]["times"][:, 0],
+                    ys=trial.output["path_times"][static_path][metric] / 1e6,
+                    ylabel=f"{metric} (ms)",
+                    title=f"{metric.capitalize()} of {name}",
+                )
+                for name, static_path in trial.output["important_paths"].items()
+            }
+            for metric in all_metrics
+        ),
+    })
+
+def plot_cc_stuff(trials: Trials) -> None:
+    datas: Mapping[str, Mapping[str, np.array]] = {}
+    max_lat = 0
+    for trial in trials.each:
+        static_path = trial.output["important_paths"]["CC"]
+        ts = trial.output["path_times"][static_path]["times"]
+        lat = trial.output["path_times"][static_path]["latency"]
+        max_lat = max(np.percentile(lat, 99), max_lat)
+        datas[conditions2label(trial.config["conditions"])] = {
+            "ts": ts,
+            "lat": lat
+        }
+
+    for label, data in datas.items():
+        plt.rcParams.update({
+            "figure.figsize": [8, 6],
+            "grid.color": "#AAAAAA",
+            "figure.autolayout": True,
+	})
+
+        fig, ax = plt.subplots()
+        ax.set_title("Rotational MTP")
+        ax.set_ylabel("Motion-to-photon latency (ms)", fontsize=20)
+        plt.ylim(0, max_lat / 1e6)
+        ax.set_xlabel("Time (s)", fontsize=20)
+        start = data["ts"][0, 0]
+        ax.plot((data["ts"][:, 0] - start) / 1e9, data["lat"] / 1e6, label=label)
+        ax.legend(loc="upper right", fontsize=12)
+        ax.tick_params("x", labelsize=16)
+        ax.tick_params("y", labelsize=16)
+        ax.grid(True)
+        fig.savefig(trial.output_dir / "mtp.png")
+        plt.close(fig)
+
+    fig, ax = plt.subplots()
+    ax.set_ylabel("Count", fontsize=20)
+    ax.set_xlabel("Motion-to-photon latency (ms)", fontsize=20)
+    # ax.set_xlim(0, max_lat)
+    for label, data in datas.items():
+        ax.hist(data["lat"], bins=25, histtype="step", label=label)
+    fig.savefig("mtp.png")
+    plt.close(fig)
+
+def group_by_conditions(trials: Trials) -> None:
+    trials.output["by_conditions"]: Mapping[Conditions, List[Trial]] = collections.defaultdict(list)
+    for trial in trials.each:
+        trials.output["by_conditions"][frozendict(trial.config["conditions"].items())].append(trial)
+
+    write_contents({
+        trials.output_dir / "conditions.txt": "\n".join(
+            f"# {conditions2label(condition)}\n" + "\n".join(
+                str(trial.output_dir)
+                for trial in trials
+            )
+            for condition, trials in trials.output["by_conditions"].items()
         )
-        duration = all_transits[0, -1] - all_transits[0, 0]
-        period = all_transits[1:, -1] - all_transits[:-1, -1]
-        print(
-            f"Period (ms): {period.mean():,.1f} +/- {period.std():,.1f}, min(data) = {period.min():.1f}, data[50%] = {numpy.percentile(period, 50):,.1f}, data[75%] = {numpy.percentile(period, 75):,.1f}, data[95%] = {numpy.percentile(period, 95):,.1f}, data[99%] = {numpy.percentile(period, 99):,.1f}, max = {period.max():.1f}"
-        )
-        rt = all_transits[1:, -1] - all_transits[:-1, 0]
-        print(
-            f"RT (ms): {rt.mean():,.1f} +/- {rt.std():,.1f}, min(data) = {rt.min():.1f}, data[50%] = {numpy.percentile(rt, 50):,.1f}, data[75%] = {numpy.percentile(rt, 75):,.1f}, data[95%] = {numpy.percentile(rt, 95):,.1f}, data[99%] = {numpy.percentile(rt, 99):,.1f}, max = {rt.max():.1f}"
-        )
-        print(f"""
-{end_latency.mean():.1f} +/- {end_latency.std():.1f} ({numpy.median(end_latency):.1f})
-{period.mean():.1f} +/- {period.std():.1f} ({numpy.median(period):.1f})
-{rt.mean():.1f} +/- {rt.std():.1f} ({numpy.median(rt):.1f})
-""".strip())
-        # print(numpy.mean(latency, axis=0))
-        # print(numpy.std(latency, axis=0))
+    })
 
-    ccs = [
-        static_path
-        for static_path in path_static_to_dynamic.keys()
-        if all(get_plugin(frame) in {"7", "3", "6"} for frame in static_path) and static_path[-1].topic_name != "vsync"
-    ]
-    assert len(ccs) == 1
-    cc = ccs[0]
-    latency = numpy.array([path[5].wall_start - path[4].wall_start for path in path_static_to_dynamic[cc]])
-    period = numpy.array([path[-1].wall_start - prev_path[-1].wall_start for prev_path, path in zip(path_static_to_dynamic[cc][:-1], path_static_to_dynamic[cc][1:])]) / 1e6
-    ts = (numpy.array([path[0].wall_start for path in path_static_to_dynamic[cc]]) - path_static_to_dynamic[cc][0][0].wall_start) / 1e6
-    import matplotlib
-    matplotlib.use('qt5agg')
-    plt.ion()
-    plt.xlabel("time (ms)", fontsize=20)
-    plt.ylabel("period (ms)", fontsize=20)
-    plt.plot(ts, latency, "ro-")
-    plt.show(block=True)
+def write_contents(content_map: Mapping[Path, Union[str, bytes]]) -> None:
+    for path, content in content_map.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            path.unlink()
+        if isinstance(content, str):
+            path.write_text(content)
+        else:
+            path.write_bytes(content)
 
+import scipy.stats
+
+def histogram(
+        ys: np.array,
+        xlabel: str,
+        title: str,
+        bins: int = 50,
+        cloud: bool = True,
+        logy: bool = True,
+        grid: bool = False,
+) -> bytes:
+    fake_file = io.BytesIO()
+    fig, ax = plt.subplots()
+    ax.hist(ys, bins=bins, align='mid')
+    if cloud:
+        ax.plot(ys, np.random.randn(*ys.shape) * (ax.get_ylim()[1] * 0.2) + (ax.get_ylim()[1] * 0.5) * np.ones(ys.shape), linestyle='', marker='.', ms=1)
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Occurrences (count)")
+    if grid:
+        ax.grid(True, which="major", axis="both")
+    if logy:
+        ax.set_yscale("log")
+    fig.savefig(fake_file)
+    plt.close(fig)
+    return fake_file.getvalue()
+
+def timeseries(
+        ts: np.array,
+        ys: np.array,
+        title: str,
+        ylabel: str,
+        series_label: Optional[str] = None,
+        grid: bool = False,
+) -> bytes:
+    fake_file = io.BytesIO()
+    fig, ax = plt.subplots()
+    ax.set_title(title)
+    ax.set_xlabel("Time since start (sec)")
+    if grid:
+        ax.grid(True, which="major", axis="both")
+    if len(ts) == len(ys) + 1:
+        ts = ts[:-1]
+    if len(ts) == len(ys) - 1:
+        ys = ys[:-1]
+    ax.plot((ts - ts[0]) / 1e9, ys, label=series_label)
+    fig.savefig(fake_file)
+    plt.close(fig)
+    return fake_file.getvalue()
+
+@ch_time_block.decor()
+def agg_compute_times(trials: Trials) -> None:
+    trials.output["compute_times"]: Mapping[str, List[np.array]] = collections.defaultdict(list)
+    for trial in trials.each:
+        for frame, (_, times, _) in trial.output["compute_times"].items():
+            trials.output["compute_times"][frame.plugin_function(" ")].append(times)
+    compute_times_dir = trials.output_dir / "compute_times"
+
+    write_contents({
+        compute_times_dir / "summary.txt": "\n".join(
+            f"{label} {(len(times))}: {print_distribution(np.concatenate(times) / 1e6)}"
+            for label, times in trials.output["compute_times"].items()
+        ),
+        **{
+            (compute_times_dir / "hist" / (label + ".png")): histogram(np.concatenate(times) / 1e6, "CPU Time (ms)", f"Compute Times of {label}")
+            for label, times in trials.output["compute_times"].items()
+        },
+    })
+
+A = TypeVar("A")
+B = TypeVar("B")
+def second(pair: Tuple[A, B]) -> B:
+    return pair[1]
+
+@ch_time_block.decor()
+def compare_compute_times(trials: Trials) -> None:
+    keys = trials.each[0].output["compute_times"].keys()
+    for trial in trials.each:
+        keys &= trial.output["compute_times"].keys()
+    def diff(pair: Tuple[Trial, Trial]) -> Tuple[float, str]:
+        a, b = pair
+        a_keys = a.output["compute_times"].keys()
+        b_keys = b.output["compute_times"].keys()
+        for key in (a_keys & b_keys):
+            ks, p = scipy.stats.ks_2samp(a.output["compute_times"][key][1], b.output["compute_times"][key][1])
+            return p, f"- {a.output_dir!s} <-> {b.output_dir!s}: {p:.2f} {ks}"
+
+    compute_times = trials.output_dir / "compute_times"
+    write_contents({
+        compute_times / "consistency.txt": "\n".join(
+            f"# {key}\n" + "\n".join(map(second, sorted(map(diff, tqdm(itertools.combinations(trials.each, 2)))))) + "\n"
+            for key in keys
+        )
+    })
+
+@ch_time_block.decor()
+def agg_chain_metrics(trials: Trials) -> None:
+    important_chain_names = trials.each[0].output["important_paths"].keys()
+    f = lambda: collections.defaultdict(lambda: {"latency": [], "period": [], "rt": []})
+    trials.output["chain_metrics"]: Mapping[str, Mapping[frozendict, Mapping[str, List[np.array]]]] = {
+        name: f()
+        for name in important_chain_names
+    }
+    for trial in trials.each:
+        conditions = frozendict(trial.config["conditions"])
+        for name, static_path in trial.output["important_paths"].items():
+            for metric in all_metrics:
+                trials.output["chain_metrics"][name][conditions][metric].append(
+                    trial.output["path_times"][static_path][metric]
+                )
+
+    chains_dir = trials.output_dir / "chains"
+    # TODO: write metrics
+    # TODO: plot hist
+
+@ch_time_block.decor()
+def compare_chain_metrics(trials: Trials) -> None:
+    conditions = set(
+        frozendict({
+            key: val
+            for key, val in condition
+            if key != "scheduler"
+        })
+        for condition in trials.output["by_conditions"].keys()
+    )
+    all_schedulers = ["default", "priority", "manual", "static", "dynamic"]
+    for condition in conditions:
+        schedulers = [
+            scheduler
+            for scheduler in all_schedulers
+            if frozendict(condition.copy(scheduler=scheduler)) in trial.output["by_conditions"]
+        ]
+        print(f"## {conditions2label(condition)}")
+        for sched_a, sched_b in itertools.combinations(schedulers, 2):
+            trial_a = trials.output["compute"]
+            for name in a.output["important_chains"].keys():
+                for metric in all_metrics:
+                    a_data = trial_a["path_times"][trial_a.output["important_paths"][name]][metric]
+                    b_data = trial_b["path_times"][trial_b.output["important_paths"][name]][metric]
+                    np.median(a_data) / np.median(b_data)
+                    np.stddev(a_data) / np.stddev(b_data)
+
+
+# def compare_chain_metrics(all_trials: Trials) -> None:
+#     for conditions, trials in all_trials.output["by_conditions"].items():
+#         for a, b in itertools.combinations(trials, 2):
+#             names = a.output["important_paths"].keys()
+#             for name in names:
+#                 scipy.stats.ks_2samp(a.output["lat"])
 
 def data_flow_bar_chart(static_path, dynamic_paths, latencies) -> None:
     rowNum = -1.5
@@ -425,27 +706,23 @@ def data_flow_bar_chart(static_path, dynamic_paths, latencies) -> None:
     fig.savefig(f"dataflow_time_{random_num}.png")
     plt.close(fig)
 
-
-def get_plugin(frame: StaticFrame) -> Optional[str]:
-    """Returns the name of the plugin responsible for calling this static frame (if known). Else None."""
-    if not frame.plugin and frame.parent is not None:
-        return get_plugin(frame.parent)
-    else:
-        return frame.plugin
-
-
-def get_topic(frame: StaticFrame) -> Optional[str]:
-    """Returns the topic of the plugin responsible for calling this static frame (if known). Else None."""
-    if frame.function_name == "callback" and frame.topic_name is None:
-        return get_topic(frame.parent.parent)
-    else:
-        if frame.function_name in {"get", "put"}:
-            assert frame.topic_name is not None
-        return frame.topic_name
-
-
-analyze_trials_fns: List[Callable[[Trials], None]] = []
-analyze_trial_fns: List[Callable[[Trial], None]] = [callgraph, data_flow_graph]
+analyze_trials_fns: List[Callable[[Trials], None]] = [
+    group_by_conditions,
+    agg_compute_times,
+    compare_compute_times,
+    agg_chain_metrics,
+    plot_cc_stuff,
+]
+analyze_trial_fns: List[Callable[[Trial], None]] = [
+    plot_callgraph,
+    gen_compute_times,
+    plot_compute_times,
+    gen_dfg,
+    plot_dfg,
+    gen_paths,
+    gen_path_times,
+    plot_paths,
+]
 
 
 def analyze_trials(trials: Trials) -> None:
@@ -454,9 +731,8 @@ def analyze_trials(trials: Trials) -> None:
     All inter-trial analyses should be started from here.
 
     """
-    for analyze_trials_fn in analyze_trials_fns:
-        analyze_trials_fn(trials)
-
     for analyze_trial_fn in analyze_trial_fns:
-        for trial in trials.each:
-            analyze_trial_fn(trial)
+        trials.each = list(map(analyze_trial_fn, trials.each))
+
+    for analyze_trials_fn in analyze_trials_fns:
+        trials = analyze_trials_fn(trial)

@@ -8,17 +8,16 @@ argument.
 """
 
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
-import charmonium.cache as ch_cache
+import yaml
 
 from .call_tree import CallTree
 from .types import Trial, Trials
+from charmonium.cache import memoize
 
-CACHE_PATH = Path(".cache")
 
-
-@ch_cache.decor(ch_cache.FileStore.create(CACHE_PATH))
+@memoize()
 def read_trial(
     metrics: Path,
     verify: bool = False,
@@ -28,10 +27,11 @@ def read_trial(
     This should only contain high-level function-calls.
 
     """
-
+    config = yaml.load((metrics / "config.yaml").read_text(), Loader=yaml.SafeLoader)
     return Trial(
         call_trees=CallTree.from_metrics_dir(metrics, verify),
         output_dir=metrics,
+        config=config,
     )
 
 

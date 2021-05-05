@@ -251,10 +251,10 @@ class CallTree:
             StaticFrame, List[DynamicFrame]
         ] = collections.defaultdict(list)
         for index, row in tqdm(
-            frames.iterrows(),
-            total=len(frames),
-            desc=f"Reconstrucing stack {thread_id}",
-            unit="frame",
+                frames.iterrows(),
+                total=len(frames),
+                desc=f"Reconstrucing stack {thread_id}",
+                unit="frame",
         ):
             # Get parent as DynamicFrame or None
             assert (not verify) or row["caller"] == 0 or row["caller"] < index[1]
@@ -288,19 +288,4 @@ class CallTree:
             root=index_to_frame[(thread_id, 0)],
             static_to_dynamic=dict(static_to_dynamic),
             calls=calls,
-        )
-
-    @classmethod
-    def from_metrics_dir(
-        cls: Type[_Class],
-        metrics: Path,
-        verify: bool = False,
-    ) -> Mapping[int, _Class]:
-        """Returns a forest constructed from each database in the dir."""
-        return dict(
-            dask.bag.from_sequence((metrics / "frames").iterdir())
-            .map(lambda path: cls.from_database(str(path), verify))
-            .filter(lambda tree: tree is not None)
-            .map(lambda tree: (tree.thread_id, tree))
-            .compute()
         )

@@ -16,8 +16,6 @@ import typer
 import charmonium.time_block as ch_time_block
 
 from .analyze_trials import analyze_trials
-from .types import Trials
-from .read_trials import read_trials
 from .util import command_exists
 
 app = typer.Typer()
@@ -31,23 +29,16 @@ def main(
     verify: bool = typer.Option(
         False, "--verify", help="Preform extra checks on the data"
     ),
-    output_dir: Path = Path("output/"),
     extra_metrics: List[Path] = typer.Option([], "--also"),
 ) -> None:
     """Runs every analysis on every trial."""
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
-    output_dir.mkdir()
 
     candidates = [
         path
         for path in list(metrics_dir.iterdir()) + extra_metrics
         if path.is_dir() and (path / "log").exists()
     ]
-
-    trials = read_trials(candidates, output_dir, verify)
-
-    analyze_trials(trials)
+    analyze_trials(candidates, metrics_dir)
 
 
 @app.command()

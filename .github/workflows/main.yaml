@@ -40,4 +40,4 @@ jobs:
       - name: Run checks
         run: |
           cd "${GITHUB_WORKSPACE}"
-          poetry run typer illixr.analysis.main run check --no-modify
+          # poetry run typer illixr.analysis.main run check --no-modify

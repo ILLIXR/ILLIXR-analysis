@@ -24,11 +24,13 @@ pygraphviz = "^1.7"
 "charmonium.cache" = "^1.1.0"
 matplotlib = "^3.3.4"
 ipdb = "^0.13.6"
-dask = {extras = ["bag"], version = "^2021.3.0"}
+dask = {extras = ["distributed"], version = "^2021.4.1"}
 PyQt5 = "^5.15.4"
 scipy = "^1.6.3"
 frozendict = "^1.2"
 "charmonium.time-block" = "^0.2.1"
+graphviz = "^0.16"
+bokeh = "^2.3.1"
 
 [tool.poetry.dev-dependencies]
 autoflake = "^1.4"

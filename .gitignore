@@ -16,3 +16,4 @@ dmypy.json
 # from pyenv
 .python-version
 .cache/
+dask-worker-space/

@@ -9,7 +9,38 @@ import abc
 import itertools
 import subprocess
 from typing import Any, Callable, Iterable, List, Optional, TypeVar
+import collections
+import random
+import contextlib
+from enum import Enum
+from pathlib import Path
+import shutil
+from typing import (
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Any,
+    Optional,
+    Set,
+    Tuple,
+    TypeVar,
+    Union,
+)
+import warnings
+import itertools
+import io
+import multiprocessing
 
+import anytree  # type: ignore
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import networkx as nx  # type: ignore
+import numpy as np
+import pygraphviz  # type: ignore
 import pandas as pd  # type: ignore
 from pandas.api.types import union_categoricals  # type: ignore
 from typing_extensions import Protocol
@@ -187,3 +218,124 @@ def set_index_with_uniquifier(
         .set_index(uniquifier_column, append=True)
         .sort_index(inplace=False)
     )
+
+def summary_stats(data: np.array, digits: int = 1) -> str:
+    percentiles = [25, 75, 90, 95]
+    percentiles_str = " " + " ".join(
+        f"[{percentile}%]={np.percentile(data, percentile):,.{digits}f}"
+        for percentile in percentiles
+    )
+    with np.errstate(invalid="ignore"):
+        return f"{data.mean():,.{digits}f} +/- {data.std():,.{digits}f} ({data.std() / data.mean() * 100:.0f}%) med={np.median(data):,.{digits}f} count={len(data)}{percentiles_str}"
+
+def right_pad(text: str, length: int) -> str:
+    return text + " " * max(0, length - len(text))
+
+Key = TypeVar("Key")
+Val = TypeVar("Val")
+def dict_concat(dicts: Iterable[Mapping[Key, Val]]) -> Mapping[Key, Val]:
+    return {
+        key: val
+        for dict in dicts
+        for key, val in dict.items()
+    }
+
+def write_contents(content_map: Mapping[Path, Union[str, bytes]]) -> None:
+    for path, content in content_map.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            path.unlink()
+        if isinstance(content, str):
+            path.write_text(content)
+        else:
+            path.write_bytes(content)
+
+def histogram(
+        ys: np.array,
+        xlabel: str,
+        title: str,
+        bins: int = 50,
+        cloud: bool = True,
+        logy: bool = True,
+        grid: bool = False,
+) -> bytes:
+    fake_file = io.BytesIO()
+    fig = plt.figure()
+    ax = fig.add_subplot(1, 1, 1)
+    ax.hist(ys, bins=bins, align='mid')
+    if cloud:
+        ax.plot(ys, np.random.randn(*ys.shape) * (ax.get_ylim()[1] * 0.2) + (ax.get_ylim()[1] * 0.5) * np.ones(ys.shape), linestyle='', marker='.', ms=1)
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Occurrences (count)")
+    if grid:
+        ax.grid(True, which="major", axis="both")
+    if logy:
+        ax.set_yscale("log")
+    fig.savefig(fake_file)
+    plt.close(fig)
+    return fake_file.getvalue()
+
+def timeseries(
+        ts: np.array,
+        ys: np.array,
+        title: str,
+        ylabel: str,
+        series_label: Optional[str] = None,
+        grid: bool = False,
+) -> bytes:
+    fake_file = io.BytesIO()
+    fig = plt.figure()
+    ax = fig.add_subplot(1, 1, 1)
+    ax.set_title(title)
+    ax.set_xlabel("Time since start (sec)")
+    if grid:
+        ax.grid(True, which="major", axis="both")
+    if len(ts) == len(ys) + 1:
+        ts = ts[:-1]
+    if len(ts) == len(ys) - 1:
+        ys = ys[:-1]
+    ax.plot((ts - ts[0]) / 1e9, ys, label=series_label)
+    fig.savefig(fake_file)
+    plt.close(fig)
+    return fake_file.getvalue()
+
+# TODO: replace with toolz
+A = TypeVar("A")
+B = TypeVar("B")
+def second(pair: Tuple[A, B]) -> B:
+    return pair[1]
+
+T = TypeVar("T")
+
+
+def chunker(it: Iterable[T], size: int) -> Iterable[List[T]]:
+    """chunk input into size or less chunks
+shamelessly swiped from Lib/multiprocessing.py:Pool._get_task"""
+    it = iter(it)
+    while True:
+        x = list(itertools.islice(it, size))
+        if not x:
+            return
+        yield x
+
+# import tracemalloc
+# tracemalloc.start(25)
+
+biggest_offenders = []
+
+def track_memory_usage():
+    def decorator(function):
+        def inner_function(*args, **kwargs):
+            snapshot1 = tracemalloc.take_snapshot()
+            ret = function(*args, **kwargs)
+            snapshot2 = tracemalloc.take_snapshot()
+            diffs = snapshot2.compare_to(snapshot1, 'lineno')
+            print(str(function))
+            for stat in diffs[:10]:
+                print("%s memory blocks: %.1f KiB" % (stat.count, stat.size / 1024))
+                for line in stat.traceback.format():
+                    print(line)
+            return ret
+        return inner_function
+    return decorator

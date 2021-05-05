@@ -3,6 +3,7 @@
 This module should only call out to the highest-level of functions
 defined in other modules.  """
 
+import contextlib
 import shlex
 import subprocess
 import sys
@@ -10,35 +11,43 @@ from pathlib import Path
 import shutil
 from typing import List, Union
 
+import dask.bag
 import typer
+import charmonium.time_block as ch_time_block
 
 from .analyze_trials import analyze_trials
 from .types import Trials
-from .read_trials import read_trial
+from .read_trials import read_trials
 from .util import command_exists
 
 app = typer.Typer()
 
+import multiprocessing
+
 # See https://clig.dev/ for guidelines
 @app.command()
 def main(
-    data_dirs: Path,
+    metrics_dir: Path,
     verify: bool = typer.Option(
         False, "--verify", help="Preform extra checks on the data"
     ),
+    output_dir: Path = Path("output/"),
+    extra_metrics: List[Path] = typer.Option([], "--also"),
 ) -> None:
     """Runs every analysis on every trial."""
-    output_dir = Path("output/")
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir()
-    analyze_trials(Trials(
-        each=[
-            read_trial(data_dir, verify)
-            for data_dir in data_dirs.iterdir()
-        ],
-        output_dir=output_dir,
-    ))
+
+    candidates = [
+        path
+        for path in list(metrics_dir.iterdir()) + extra_metrics
+        if path.is_dir() and (path / "log").exists()
+    ]
+
+    trials = read_trials(candidates, output_dir, verify)
+
+    analyze_trials(trials)
 
 
 @app.command()

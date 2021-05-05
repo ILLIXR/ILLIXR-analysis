@@ -52,6 +52,25 @@ class StaticFrame(anytree.NodeMixin):  # type: ignore
     _plugin: Optional[str]
     _topic_name: Optional[str]
 
+    def __hash__(self) -> int:
+        return hash((
+            self.function_name,
+            self.file_name,
+            self.line,
+            self.plugin,
+            self.topic_name,
+        )) ^ (0 if self.parent is not None else hash(self.parent))
+
+    def __determ_hash__(self) -> Any:
+        return (self.function_name, self.file_name, self.line, self.plugin, self.topic_name, self.parent)
+
+    def __eq__(self, other: object) -> bool:
+        attrs = ["function_name", "file_name", "line", "plugin", "topic_name"]
+        return all(getattr(self, attr) == getattr(other, attr) for attr in attrs) and self.parent == other.parent
+
+    def __neq__(self, other: DynamicFrame) -> bool:
+        return not self == other
+
     def plugin_function(self, sep: str = "\n") -> str:
         plugin_str = self.plugin + sep if self.plugin else ""
         return f"{plugin_str}{self.function_name}"
@@ -62,7 +81,10 @@ class StaticFrame(anytree.NodeMixin):  # type: ignore
         return f"{plugin_str}{self.function_name}{topic_str}"
 
     def file_function_line(self, sep: str=":") -> str:
-        f"{self.file_name}{sep}{self.line}{sep}{self.function_name}"
+        return f"{self.file_name}{sep}{self.line}{sep}{self.function_name}"
+
+    def __str__(self) -> str:
+        return self.file_function_line()
 
     def __init__(
         self,
@@ -117,6 +139,18 @@ class DynamicFrame(anytree.NodeMixin):  # type: ignore
     wall_stop: int
     static_frame: StaticFrame
     serial_no: Optional[int]
+
+    def __hash__(self) -> int:
+        return hash((self.thread_id, self._frame_id))
+
+    def __determ_hash__(self) -> Any:
+        return (self.thread_id, self._frame_id)
+
+    def __eq__(self, other: DynamicFrame) -> bool:
+        return self.thread_id == other.thread_id and self._frame_id == other._frame_id
+
+    def __neq__(self, other: DynamicFrame) -> bool:
+        return not self == other
 
     def __str__(self) -> str:
         """Human-readable string representation"""
@@ -188,9 +222,7 @@ class CallTree:
             frames = pandas.read_sql_query("SELECT * FROM finished;", conn)
             index = frames[["thread_id", "frame"]]
             dups = index.duplicated()
-            if dups.any():
-                print(index[dups])
-                import IPython; IPython.embed()
+            assert not dups.any()
             frames2 = sort_and_set_index(frames, ["thread_id", "frame"], verify_integrity=True)
             frames3 = to_categories(frames2, ["function_name", "topic_name"])
             frames = frames3
@@ -254,7 +286,7 @@ class CallTree:
         return cls(
             thread_id=thread_id,
             root=index_to_frame[(thread_id, 0)],
-            static_to_dynamic=static_to_dynamic,
+            static_to_dynamic=dict(static_to_dynamic),
             calls=calls,
         )
 
@@ -265,10 +297,10 @@ class CallTree:
         verify: bool = False,
     ) -> Mapping[int, _Class]:
         """Returns a forest constructed from each database in the dir."""
-        database_paths = dask.bag.from_sequence((metrics / "frames").iterdir())
-        def func (database_path) -> Optional[_Class]:
-            return cls.from_database(str(database_path), verify)
-        trees = (
-            database_paths.map(func).compute()
+        return dict(
+            dask.bag.from_sequence((metrics / "frames").iterdir())
+            .map(lambda path: cls.from_database(str(path), verify))
+            .filter(lambda tree: tree is not None)
+            .map(lambda tree: (tree.thread_id, tree))
+            .compute()
         )
-        return {tree.thread_id: tree for tree in trees if tree is not None}

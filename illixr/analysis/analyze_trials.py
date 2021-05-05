@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Munges the data into human-readable outputs.
 
 This should not take into account ILLIXR-specific information.
@@ -5,6 +7,7 @@ This should not take into account ILLIXR-specific information.
 
 import collections
 import random
+import contextlib
 from enum import Enum
 from pathlib import Path
 import shutil
@@ -15,6 +18,7 @@ from typing import (
     Iterator,
     List,
     Mapping,
+    Any,
     Optional,
     Set,
     Tuple,
@@ -33,12 +37,15 @@ import pygraphviz  # type: ignore
 import pandas as pd  # type: ignore
 from frozendict import frozendict
 import charmonium.time_block as ch_time_block
+from charmonium.cache import memoize
+import multiprocessing
 from tqdm import tqdm
+import dask.bag
 
 from .call_tree import DynamicFrame, StaticFrame
 from .types import Trial, Trials, conditions2label
 from .util import clip
-
+from .read_trials import group
 
 
 def print_distribution(data: np.array, digits: int = 1) -> str:
@@ -47,58 +54,49 @@ def print_distribution(data: np.array, digits: int = 1) -> str:
         f"[{percentile}%]={np.percentile(data, percentile):,.{digits}f}"
         for percentile in percentiles
     )
-    return f"{data.mean():,.{digits}f} +/- {data.std():,.{digits}f} ({data.std() / data.mean() * 100:.0f}%) med={np.median(data):,.{digits}f} count={len(data)}{percentiles_str}"
+    with np.errstate(invalid="ignore"):
+        return f"{data.mean():,.{digits}f} +/- {data.std():,.{digits}f} ({data.std() / data.mean() * 100:.0f}%) med={np.median(data):,.{digits}f} count={len(data)}{percentiles_str}"
 
+@memoize(verbose=False, group=group)# @ch_time_block.decor()
+def gen_static_to_dynamic(trial: Trial) -> Mapping[str, Any]:
+    static_to_dynamic: Mapping[StaticFrame, List[DynamicFrame]] = collections.defaultdict(list)
+    for tree in trial.call_trees.values():
+        for static_frame, dynamic_frames in tree.static_to_dynamic.items():
+            static_to_dynamic[static_frame].extend(dynamic_frames)
+    return {"static_to_dynamic": dict(static_to_dynamic)}
 
-@ch_time_block.decor()
-def plot_callgraph(trial: Trial) -> None:
+@memoize(verbose=False, group=group)# @ch_time_block.decor()
+def plot_callgraph(trial: Trial) -> Mapping[str, Any]:
     """Generate a visualization of the callgraph."""
-    print(f"threads: {len(trial.call_trees)}")
     total_time = sum([tree.root.cpu_time for tree in trial.call_trees.values()])
     cpu_timer_calls = sum([tree.calls for tree in trial.call_trees.values()])
     cpu_timer_overhead = cpu_timer_calls * 400
-    print(f"cpu overhead estimate: {cpu_timer_overhead / 1e6:.1f}ms, total_time: {total_time / 1e6:.1f}ms, percent error: {cpu_timer_overhead / total_time * 100 if total_time != 0 else 0:.1f}%")
+    # cpu overhead estimate: {cpu_timer_overhead / 1e6:.1f}ms, total_time: {total_time / 1e6:.1f}ms, percent error: {cpu_timer_overhead / total_time * 100 if total_time != 0 else 0:.1f}%
     graphviz = pygraphviz.AGraph(strict=True, directed=True)
-    for tree in trial.call_trees.values():
-        static_frame_time: Dict[StaticFrame, float] = collections.defaultdict(lambda: 0)
-        for dynamic_frame in anytree.PreOrderIter(tree.root):
-            static_frame_time[dynamic_frame.static_frame] += dynamic_frame.cpu_time
 
-        # for static_frame in anytree.PreOrderIter(tree.root.static_frame):
-        #     if not static_frame.is_leaf:
-        #         static_frame_other = StaticFrame(
-        #             dict(
-        #                 function_name="<other>",
-        #                 plugin_id=0,
-        #                 topic_name="",
-        #             ),
-        #             parent=static_frame,
-        #         )
-        #         static_frame_time[static_frame_other] = static_frame_time[
-        #             static_frame
-        #         ] - sum(static_frame_time[child] for child in static_frame.children)
-
-        for static_frame in anytree.PreOrderIter(tree.root.static_frame):
-            node_weight = static_frame_time[static_frame] / total_time
-            if True or static_frame.function_name not in {"get", "put"}:
-                graphviz.add_node(
+    for static_frame, dynamic_frames in trial.output["static_to_dynamic"].items():
+        static_frame_time = sum(dynamic_frame.cpu_time for dynamic_frame in dynamic_frames)
+        node_weight = static_frame_time / total_time
+        if True or static_frame.function_name not in {"get", "put"}:
+            graphviz.add_node(
+                id(static_frame),
+                label=static_frame.plugin_function_topic(),
+            )
+            if static_frame.parent is not None:
+                edge_weight = node_weight
+                graphviz.add_edge(
+                    id(static_frame.parent),
                     id(static_frame),
-                    label=static_frame.plugin_function_topic(),
+                    penwidth=clip((edge_weight) * 20, 0.1, 45),
                 )
-                if static_frame.parent is not None:
-                    edge_weight = node_weight
-                    graphviz.add_edge(
-                        id(static_frame.parent),
-                        id(static_frame),
-                        penwidth=clip((edge_weight) * 20, 0.1, 45),
-                    )
 
     dot_path = Path(trial.output_dir / "callgraph.dot")
     img_path = trial.output_dir / "callgraph.png"
     graphviz.write(dot_path)
     graphviz.draw(img_path, prog="dot")
+    return {}
 
-def gen_compute_times(trial: Trial) -> None:
+def gen_compute_times(trial: Trial) -> Mapping[str, Any]:
     top_level_fn_names = {
         "callback",
         "cam",
@@ -106,54 +104,80 @@ def gen_compute_times(trial: Trial) -> None:
         "load_camera_data",
         "_p_one_iteration",
     }
-    trial.output["compute_times"] = {}
+    output = {"compute_times": {}}
     for tree in trial.call_trees.values():
         for static_frame in anytree.PreOrderIter(tree.root.static_frame):
             fn_name_good = static_frame.function_name in top_level_fn_names or static_frame.function_name.startswith("_")
             plugin_name_good = static_frame.plugin != "1" or not trial.config["conditions"]["scheduler"] in {"static", "dynamic"}
             if fn_name_good and plugin_name_good:
                 dynamic_frames = tree.static_to_dynamic[static_frame]
-                times = np.array([dynamic_frame.cpu_time for dynamic_frame in dynamic_frames])
+                cpu_times = np.array([dynamic_frame.cpu_time for dynamic_frame in dynamic_frames])
+                wall_times = np.array([dynamic_frame.wall_time for dynamic_frame in dynamic_frames])
                 ts = np.array([dynamic_frame.wall_start for dynamic_frame in dynamic_frames])
-                trial.output["compute_times"][static_frame] = ts, times, tree.thread_id
+                output["compute_times"][static_frame] = {
+                    "ts": ts,
+                    "cpu_time": cpu_times,
+                    "wall_time": wall_times,
+                    "thread_id": tree.thread_id,
+                }
+    return output
 
-@ch_time_block.decor()
-def plot_compute_times(trial: Trial) -> None:
+def right_pad(text: str, length: int) -> str:
+    return text + " " * max(0, length - len(text))
+
+import pickle
+pickle.dumps(StaticFrame)
+
+@memoize(verbose=False, group=group)# @ch_time_block.decor()
+def plot_compute_times(trial: Trial) -> Mapping[str, Any]:
+    def compute_times(frame_data: Tuple[StaticFrame, Mapping[str, Any]]) -> Tuple[str, str]:
+        frame, data = frame_data
+        return (
+            frame.plugin,
+            " ".join([
+                right_pad(frame.plugin_function(' '), 30),
+                right_pad(f"TID={data['thread_id']}", 10),
+                right_pad(print_distribution(data["cpu_time"] / 1e6, digits=2) , 35),
+                right_pad(print_distribution(data["wall_time"] / 1e6, digits=2) , 35),
+            ]),
+        )
+
     compute_dir = trial.output_dir / "compute_times"
     write_contents({
-        compute_dir / "compute_times.txt": "\n".join(map(second, sorted([
-            (frame.plugin, f"{frame.plugin_function(' ')} TID={tid}: {print_distribution(times / 1e6, digits=2)}")
-            for frame, (_, times, tid) in trial.output["compute_times"].items()
-        ]))),
+        compute_dir / "compute_times.txt": "\n".join([
+            f"threads: {len(trial.call_trees)}",
+            *map(second, sorted(map(compute_times, trial.output["compute_times"].items()))),
+        ]),
         **{
             compute_dir / "hist" / f"{frame.plugin_function(' ')}.png": histogram(
-                ys=times / 1e6,
+                ys=data["cpu_time"] / 1e6,
                 xlabel=f"CPU Time (ms)",
                 title=f"Compute Time of {frame.plugin_function(' ')}"
             )
-            for frame, (_, times, _) in trial.output["compute_times"].items()
+            for frame, data in trial.output["compute_times"].items()
         },
         **{
             compute_dir / "ts" / f"{frame.plugin_function(' ')}.png": timeseries(
-                ts=ts,
-                ys=times / 1e6,
+                ts=data["ts"],
+                ys=data["cpu_time"] / 1e6,
                 ylabel=f"CPU Time (ms)",
                 title=f"Compute Time of {frame.plugin_function(' ')}"
             )
-            for frame, (ts, times, _) in trial.output["compute_times"].items()
+            for frame, data in trial.output["compute_times"].items()
         },
     })
+    return {}
 
 class EdgeType(Enum):
     program = 1
     async_ = 2
     sync = 3
 
-@ch_time_block.decor()
-def gen_dfg(trial: Trial) -> None:
+@memoize(verbose=False, group=group)# @ch_time_block.decor()
+def gen_dfg(trial: Trial) -> Mapping[str, Any]:
     """Generates a visualization of dataflow over Switchboard between plugins."""
 
-    trial.output["dynamic_dfg"] = nx.DiGraph()
+    dynamic_dfg = nx.DiGraph()
 
     # Add all program edges
     for tree in trial.call_trees.values():
@@ -161,7 +185,7 @@ def gen_dfg(trial: Trial) -> None:
         for frame in anytree.PreOrderIter(tree.root):
             if frame.static_frame.function_name in {"put", "get", "callback", "entry", "exit"}:
                 if last_comm is not None:
-                    trial.output["dynamic_dfg"].add_edge(
+                    dynamic_dfg.add_edge(
                         last_comm, frame, topic_name=None, type=EdgeType.program
                     )
                 last_comm = frame
@@ -183,7 +207,7 @@ def gen_dfg(trial: Trial) -> None:
                 data_id = (frame.static_frame.topic_name, frame.serial_no)
                 put = data_to_put.get(data_id, None)
                 if put is not None:
-                    trial.output["dynamic_dfg"].add_edge(
+                    dynamic_dfg.add_edge(
                         put,
                         frame,
                         topic_name=frame.static_frame.topic_name,
@@ -206,22 +230,23 @@ def gen_dfg(trial: Trial) -> None:
                 data_id = (topic_name, callback_count)
                 put = data_to_put.get(data_id, None)
                 if put is not None:
-                    trial.output["dynamic_dfg"].add_edge(
+                    dynamic_dfg.add_edge(
                         put, frame, topic_name=topic_name, type=EdgeType.sync
                     )
                 else:
                     warnings.warn(f"cb: {data_id} from {frame.static_frame.plugin} not found", UserWarning)
 
-    trial.output["static_dfg"] = nx.DiGraph()
-    for src, dst, edge_attrs in trial.output["dynamic_dfg"].edges(data=True):
-        trial.output["static_dfg"].add_edge(
+    static_dfg = nx.DiGraph()
+    for src, dst, edge_attrs in dynamic_dfg.edges(data=True):
+        static_dfg.add_edge(
             src.static_frame,
             dst.static_frame,
             **edge_attrs,
         )
+    return {"dynamic_dfg": dynamic_dfg, "static_dfg": static_dfg}
 
-@ch_time_block.decor()
-def plot_dfg(trial: Trial) -> None:
+@memoize(verbose=False, group=group)# @ch_time_block.decor()
+def plot_dfg(trial: Trial) -> Mapping[str, Any]:
 
     plugin_to_nodes: Dict[str, List[StaticFrame]] = collections.defaultdict(list)
     static_dfg_graphviz = pygraphviz.AGraph(strict=True, directed=True)
@@ -274,10 +299,11 @@ def plot_dfg(trial: Trial) -> None:
     img_path = trial.output_dir / "dataflow.png"
     static_dfg_graphviz.write(dot_path)
     static_dfg_graphviz.draw(img_path, prog="dot")
+    return {}
 
 
-@ch_time_block.decor()
-def gen_paths(trial: Trial) -> None:
+@memoize(verbose=False, group=group)# @ch_time_block.decor()
+def gen_paths(trial: Trial) -> Mapping[str, Any]:
     path_static_to_dynamic: Mapping[
         Tuple[StaticFrame, ...], List[Tuple[DynamicFrame, ...]]
     ] = collections.defaultdict(list)
@@ -290,40 +316,35 @@ def gen_paths(trial: Trial) -> None:
 
     dynamic_dfg_rev = trial.output["dynamic_dfg"].reverse()
 
-    srcs = set()
     def explore(
         dynamic_frame: DynamicFrame,
-        static_path: Tuple[StaticFrame, ...],
         dynamic_path: Tuple[DynamicFrame, ...],
         tabu: Set[DynamicFrame],
         iter: int,
-    ) -> Iterator[Tuple[Tuple[StaticFrame, ...], Tuple[DynamicFrame, ...]]]:
-        static_path += (dynamic_frame.static_frame,)
+    ) -> Iterator[Tuple[DynamicFrame, ...]]:
         dynamic_path += (dynamic_frame,)
         assert iter < 30
         if is_src(dynamic_frame.static_frame):
-            srcs.add(dynamic_frame.static_frame.plugin)
-            yield (static_path, dynamic_path)
+            yield dynamic_path
         for next_dynamic_frame in dynamic_dfg_rev[dynamic_frame]:
             if next_dynamic_frame.static_frame not in tabu:
                 yield from explore(
                     next_dynamic_frame,
-                    static_path,
                     dynamic_path,
                     tabu | {next_dynamic_frame.static_frame},
                     iter + 1,
                 )
 
     for static_dst in trial.output["static_dfg"]:
-        if is_dst(static_dst):
-            for call_tree in trial.call_trees.values():
-                for dynamic_dst in call_tree.static_to_dynamic[static_dst]:
-                    for static_path, dynamic_path in explore(
-                        dynamic_dst, (), (), {dynamic_dst.static_frame}, 0
-                    ):
-                        path_static_to_dynamic[static_path[::-1]].append(
-                            dynamic_path[::-1]
-                        )
+        assert static_dst in trial.output["static_to_dynamic"], f"{static_dst!s} from static_dfg is not found in static_to_dynamic"
+        assert trial.output["static_to_dynamic"][static_dst]
+        for dynamic_dst in trial.output["static_to_dynamic"][static_dst]:
+                for dynamic_path in explore(
+                    dynamic_dst, (), {dynamic_dst.static_frame}, 0
+                ):
+                    dynamic_path = dynamic_path[::-1]
+                    static_path = tuple(frame.static_frame for frame in dynamic_path)
+                    path_static_to_dynamic[static_path].append(dynamic_path)
 
     def get_input_times(path: Iterable[DynamicFrame]) -> Iterable[int]:
         return (
@@ -350,7 +371,7 @@ def gen_paths(trial: Trial) -> None:
                 path_static_to_dynamic_freshest[static_path].append(dynamic_path)
                 freshest_inputs_time = inputs_time
 
-    path_static_to_dynamic = path_static_to_dynamic_freshest
+    path_static_to_dynamic = dict(path_static_to_dynamic_freshest)
 
     # TODO: compute how many puts are "used/ignored"
 
@@ -372,15 +393,17 @@ def gen_paths(trial: Trial) -> None:
         "Cam":    (8,) * 2 + (2,) * 3 + (3,) * 2 +            (6,) * 4,
     }
 
-    trial.output["important_paths"] = {
-        name: find_path(path_static_to_dynamic.keys(), path_signature)
-        for name, path_signature in important_path_signatures.items()
-     }
+    return {
+        "important_paths": {
+            name: find_path(path_static_to_dynamic.keys(), path_signature)
+            for name, path_signature in important_path_signatures.items()
+        },
+        "path_static_to_dynamic": path_static_to_dynamic,
+    }
 
-    trial.output["path_static_to_dynamic"] = path_static_to_dynamic
-
-def gen_path_times(trial: Trial) -> None:
-    trial.output["path_times"] = {}
+@memoize(verbose=False, group=group)
+def gen_path_times(trial: Trial) -> Mapping[str, Any]:
+    path_times = {}
     for static_path, dynamic_paths in trial.output["path_static_to_dynamic"].items():
         data = (
             np.array(
@@ -400,13 +423,14 @@ def gen_path_times(trial: Trial) -> None:
             data
         ) * 0.01, "column monotonicity is violated"
 
-        trial.output["path_times"][static_path] = {
+        path_times[static_path] = {
             "times": data,
             "rel_time": data - data[:, 0][:, np.newaxis],
             "latency": data[:, -1] - data[:, 0],
             "period": data[1:, -1] - data[:-1, -1],
             "rt": data[1:, -1] - data[:-1, 0],
         }
+    return {"path_times": path_times}
 
 Key = TypeVar("Key")
 Val = TypeVar("Val")
@@ -419,8 +443,8 @@ def dict_concat(dicts: Iterable[Mapping[Key, Val]]) -> Mapping[Key, Val]:
 
 all_metrics = ["latency", "period", "rt"]
 
-@ch_time_block.decor()
-def plot_paths(trial: Trial) -> None:
+@memoize(verbose=False, group=group)# @ch_time_block.decor()
+def plot_paths(trial: Trial) -> Mapping[str, Any]:
     def summarize(static_path: tuple[StaticFrame, ...]) -> str:
         dynamic_paths = trial.output["path_static_to_dynamic"][static_path]
         data = trial.output["path_times"][static_path]
@@ -467,8 +491,10 @@ def plot_paths(trial: Trial) -> None:
             for metric in all_metrics
         ),
     })
+    return {}
 
-def plot_cc_stuff(trials: Trials) -> None:
+@memoize(verbose=False, group=group)
+def plot_cc_stuff(trials: Trials) -> Mapping[str, Any]:
     datas: Mapping[str, Mapping[str, np.array]] = {}
     max_lat = 0
     for trial in trials.each:
@@ -510,11 +536,13 @@ def plot_cc_stuff(trials: Trials) -> None:
         ax.hist(data["lat"], bins=25, histtype="step", label=label)
     fig.savefig("mtp.png")
     plt.close(fig)
+    return {}
 
-def group_by_conditions(trials: Trials) -> None:
-    trials.output["by_conditions"]: Mapping[Conditions, List[Trial]] = collections.defaultdict(list)
+@memoize(verbose=False, group=group)
+def group_by_conditions(trials: Trials) -> Mapping[str, Any]:
+    by_conditions: Mapping[Conditions, List[Trial]] = collections.defaultdict(list)
     for trial in trials.each:
-        trials.output["by_conditions"][frozendict(trial.config["conditions"].items())].append(trial)
+        by_conditions[frozendict(trial.config["conditions"].items())].append(trial)
 
     write_contents({
         trials.output_dir / "conditions.txt": "\n".join(
@@ -522,9 +550,10 @@ def group_by_conditions(trials: Trials) -> None:
                 str(trial.output_dir)
                 for trial in trials
             )
-            for condition, trials in trials.output["by_conditions"].items()
+            for condition, trials in by_conditions.items()
         )
     })
+    return {"by_conditions": dict(by_conditions)}
 
 def write_contents(content_map: Mapping[Path, Union[str, bytes]]) -> None:
     for path, content in content_map.items():
@@ -586,32 +615,33 @@ def timeseries(
     plt.close(fig)
     return fake_file.getvalue()
 
-@ch_time_block.decor()
-def agg_compute_times(trials: Trials) -> None:
-    trials.output["compute_times"]: Mapping[str, List[np.array]] = collections.defaultdict(list)
+@memoize(verbose=False, group=group)# @ch_time_block.decor()
+def agg_compute_times(trials: Trials) -> Mapping[str, Any]:
+    compute_times: Mapping[str, List[np.array]] = collections.defaultdict(list)
     for trial in trials.each:
-        for frame, (_, times, _) in trial.output["compute_times"].items():
-            trials.output["compute_times"][frame.plugin_function(" ")].append(times)
+        for frame, data in trial.output["compute_times"].items():
+            compute_times[frame.plugin_function(" ")].append(data["cpu_time"])
     compute_times_dir = trials.output_dir / "compute_times"
 
     write_contents({
         compute_times_dir / "summary.txt": "\n".join(
             f"{label} {(len(times))}: {print_distribution(np.concatenate(times) / 1e6)}"
-            for label, times in trials.output["compute_times"].items()
+            for label, times in compute_times.items()
         ),
         **{
-            (compute_times_dir / "hist" / (label + ".png")): histogram(np.concatenate(times) / 1e6, "CPU Time (ms)", f"Compute Times of {label}")
-            for label, times in trials.output["compute_times"].items()
+            compute_times_dir / "hist" / (label + ".png"): histogram(np.concatenate(times) / 1e6, "CPU Time (ms)", f"Compute Times of {label}")
+            for label, times in compute_times.items()
         },
     })
+    return {"compute_times": dict(compute_times)}
 
 A = TypeVar("A")
 B = TypeVar("B")
 def second(pair: Tuple[A, B]) -> B:
     return pair[1]
 
-@ch_time_block.decor()
-def compare_compute_times(trials: Trials) -> None:
+@memoize(verbose=False, group=group)# @ch_time_block.decor()
+def compare_compute_times(trials: Trials) -> Mapping[str, Any]:
     keys = trials.each[0].output["compute_times"].keys()
     for trial in trials.each:
         keys &= trial.output["compute_times"].keys()
@@ -630,12 +660,14 @@ def compare_compute_times(trials: Trials) -> None:
             for key in keys
         )
     })
+    return {}
 
-@ch_time_block.decor()
-def agg_chain_metrics(trials: Trials) -> None:
-    important_chain_names = trials.each[0].output["important_paths"].keys()
+@memoize(verbose=False, group=group)# @ch_time_block.decor()
+def agg_chain_metrics(trials: Trials) -> Mapping[str, Any]:
     f = lambda: collections.defaultdict(lambda: {"latency": [], "period": [], "rt": []})
-    trials.output["chain_metrics"]: Mapping[str, Mapping[frozendict, Mapping[str, List[np.array]]]] = {
+    important_chain_names = trials.each[0].output["important_paths"].keys()
+    conditions = set(frozendict(trial.config["conditions"]) for trial in trials.each)
+    chain_metrics: Mapping[str, Mapping[frozendict, Mapping[str, List[np.array]]]] = {
         name: f()
         for name in important_chain_names
     }
@@ -643,16 +675,56 @@ def agg_chain_metrics(trials: Trials) -> None:
         conditions = frozendict(trial.config["conditions"])
         for name, static_path in trial.output["important_paths"].items():
             for metric in all_metrics:
-                trials.output["chain_metrics"][name][conditions][metric].append(
+                chain_metrics[name][conditions][metric].append(
                     trial.output["path_times"][static_path][metric]
                 )
 
     chains_dir = trials.output_dir / "chains"
+
+    def summarize(static_path: tuple[StaticFrame, ...]) -> str:
+        dynamic_paths = trial.output["path_static_to_dynamic"][static_path]
+        data = trial.output["path_times"][static_path]
+        return "\n".join([
+            "\n".join(f"{print_distribution(data[metric] / 1e6)}" for metric in all_metrics),
+        ])
+
+
+    write_contents({
+        **{
+            chains_dir / f"summary.txt": "\n".join(
+                "\n".join([f"# {condition}"] + [
+                    "\n".join([
+                        " ".join([
+                            right_pad("{name} {metric} ({len(np.concat(chain_metrics[name][condition][metric]))})", length=25),
+                            print_dist(np.concat(chain_metrics[name][condition][metric]))
+                        ])
+                        for metric in all_metrics
+                    ])
+                    for name in important_chain_names
+                ] + [""])
+                for condition in conditions
+            )
+        },
+        **dict_concat(
+                "\n".join([f"# {condition}"] + [
+                    "\n".join([
+                        " ".join([
+                            right_pad("{name} {metric} ({len(np.concat(chain_metrics[name][condition][metric]))})", length=25),
+                            print_dist(np.concat(chain_metrics[name][condition][metric]))
+                        ])
+                        for metric in all_metrics
+                    ])
+                    for name in important_chain_names
+                ] + [""])
+                for condition in conditions
+            ),
+    })
     # TODO: write metrics
     # TODO: plot hist
+    return {"chain_metrics": {key: dict(val) for key, val in chain_metrics.items()}}
 
-@ch_time_block.decor()
-def compare_chain_metrics(trials: Trials) -> None:
+@memoize(verbose=False, group=group)# @ch_time_block.decor()
+def compare_chain_metrics(trials: Trials) -> Mapping[str, Any]:
     conditions = set(
         frozendict({
             key: val
@@ -677,7 +749,7 @@ def compare_chain_metrics(trials: Trials) -> None:
                     b_data = trial_b["path_times"][trial_b.output["important_paths"][name]][metric]
                     np.median(a_data) / np.median(b_data)
                     np.stddev(a_data) / np.stddev(b_data)
-
+    return {}
 
 # def compare_chain_metrics(all_trials: Trials) -> None:
 #     for conditions, trials in all_trials.output["by_conditions"].items():
@@ -706,14 +778,8 @@ def data_flow_bar_chart(static_path, dynamic_paths, latencies) -> None:
     fig.savefig(f"dataflow_time_{random_num}.png")
     plt.close(fig)
 
-analyze_trials_fns: List[Callable[[Trials], None]] = [
-    group_by_conditions,
-    agg_compute_times,
-    compare_compute_times,
-    agg_chain_metrics,
-    plot_cc_stuff,
-]
 analyze_trial_fns: List[Callable[[Trial], None]] = [
+    gen_static_to_dynamic,
     plot_callgraph,
     gen_compute_times,
     plot_compute_times,
@@ -724,6 +790,16 @@ analyze_trial_fns: List[Callable[[Trial], None]] = [
     plot_paths,
 ]
 
+analyze_trials_fns: List[Callable[[Trials], None]] = [
+    group_by_conditions,
+    agg_compute_times,
+    compare_compute_times,
+    agg_chain_metrics,
+    plot_cc_stuff,
+]
+
+def get_name(function, default: str = "unknown") -> str:
+    return getattr(function, "name", getattr(function, "__name__", default))
 
 def analyze_trials(trials: Trials) -> None:
     """Main entrypoint for inter-trial analysis.
@@ -731,8 +807,17 @@ def analyze_trials(trials: Trials) -> None:
     All inter-trial analyses should be started from here.
 
     """
-    for analyze_trial_fn in analyze_trial_fns:
-        trials.each = list(map(analyze_trial_fn, trials.each))
+
+    for trial in trials.each:
+        for analyze_trial_fn in analyze_trial_fns:
+            with ch_time_block.ctx(get_name(analyze_trial_fn)):
+                output = analyze_trial_fn(trial)
+                generated_keys = output.keys()
+                if generated_keys:
+                    print(f"Generated {' '.join(generated_keys)}")
+                trial.output.update(output)
 
     for analyze_trials_fn in analyze_trials_fns:
-        trials = analyze_trials_fn(trial)
+        with ch_time_block.ctx(get_name(analyze_trials_fn)):
+            output = analyze_trials_fn(trials)
+            trials.output.update(output)

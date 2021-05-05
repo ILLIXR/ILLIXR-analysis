@@ -106,11 +106,11 @@ d = ["aiohttp (>=3.3.2)", "aiohttp-cors"]
 
 [[package]]
 name = "charmonium.cache"
-version = "1.0.0"
+version = "1.1.0"
 description = "Provides a decorator for caching a function and an equivalent command-line util."
 category = "main"
 optional = false
-python-versions = ">=3.6,<3.10"
+python-versions = ">=3.7,<3.10"
 
 [package.dependencies]
 attrs = ">=20.3.0,<21.0.0"
@@ -566,7 +566,7 @@ python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*"
 
 [[package]]
 name = "pygments"
-version = "2.8.1"
+version = "2.9.0"
 description = "Pygments is a syntax highlighting package written in Python."
 category = "main"
 optional = false
@@ -816,7 +816,7 @@ testing = ["pytest (>=4.6)", "pytest-checkdocs (>=1.2.3)", "pytest-flake8", "pyt
 [metadata]
 lock-version = "1.1"
 python-versions = ">=3.8,<3.10"
-content-hash = "ddab00bff7f2f21e3de52c4110812f28824b04c198e9a381a4e6f2ca07678b5f"
+content-hash = "c636d560ff400d8e9395558095746ea4ef50f1b2e5923f830e691674575633b7"
 
 [metadata.files]
 anytree = [
@@ -853,8 +853,8 @@ black = [
     {file = "black-20.8b1.tar.gz", hash = "sha256:1c02557aa099101b9d21496f8a914e9ed2222ef70336404eeeac8edba836fbea"},
 ]
 "charmonium.cache" = [
-    {file = "charmonium.cache-1.0.0-py3-none-any.whl", hash = "sha256:82f18fc5b9afbb205b24edb53be2ab509b8877aa74303135e54e0f6d8add7bad"},
-    {file = "charmonium.cache-1.0.0.tar.gz", hash = "sha256:7f93106796cf95cef97fae977b6e567a08f9f29e0bbafe1c42d52f014ba8f916"},
+    {file = "charmonium.cache-1.1.0-py3-none-any.whl", hash = "sha256:7ea0f228c8cccf173a472261f3528760a978b7699ffbf43d982d5448f021866f"},
+    {file = "charmonium.cache-1.1.0.tar.gz", hash = "sha256:53acb5b4f2e5c48cfef8c623e2a5044ca60e7543f2453acf989059650c556c7e"},
 ]
 "charmonium.time-block" = [
     {file = "charmonium.time_block-0.2.1-py3-none-any.whl", hash = "sha256:74f9210327dcbd7af011638ed5c29ad82b1c2aa9eb139edfecce869017318a06"},
@@ -1183,8 +1183,8 @@ pyflakes = [
     {file = "pyflakes-2.3.1.tar.gz", hash = "sha256:f5bc8ecabc05bb9d291eb5203d6810b49040f6ff446a756326104746cc00c1db"},
 ]
 pygments = [
-    {file = "Pygments-2.8.1-py3-none-any.whl", hash = "sha256:534ef71d539ae97d4c3a4cf7d6f110f214b0e687e92f9cb9d2a3b0d3101289c8"},
-    {file = "Pygments-2.8.1.tar.gz", hash = "sha256:2656e1a6edcdabf4275f9a3640db59fd5de107d88e8663c5d4e9a0fa62f77f94"},
+    {file = "Pygments-2.9.0-py3-none-any.whl", hash = "sha256:d66e804411278594d764fc69ec36ec13d9ae9147193a1740cd34d272ca383b8e"},
+    {file = "Pygments-2.9.0.tar.gz", hash = "sha256:a18f47b506a429f6f4b9df81bb02beab9ca21d0a5fee38ed15aef65f0545519f"},
 ]
 pygraphviz = [
     {file = "pygraphviz-1.7.zip", hash = "sha256:a7bec6609f37cf1e64898c59f075afd659106cf9356c5f387cecaa2e0cdb2304"},

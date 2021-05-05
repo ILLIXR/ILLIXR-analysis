@@ -22,12 +22,12 @@ class Trial:
     output: Dict[str, Any] = {}
 
     def __cache_key__(self) -> Any:
-        return None
-
-    def __cache_val__(self) -> Any:
         return self.output_dir
 
-@attr.frozen
+    def __cache_ver__(self) -> Any:
+        return None
+
+@attr.define()
 class Trials:
     """A collection of trials of ILLIXR, to be analyzed together."""
 
@@ -36,7 +36,7 @@ class Trials:
     output: Dict[str, Any] = {}
 
     def __cache_key__(self) -> Any:
-        return None
+        return ([trial.__cache_key__() for trial in self.each], self.output_dir)
 
-    def __cache_val__(self) -> Any:
-        return self.output_dir
+    def __cache_ver__(self) -> Any:
+        return None

@@ -28,6 +28,7 @@ from typing import (
 import warnings
 import itertools
 import io
+import gc
 
 import anytree  # type: ignore
 import yaml
@@ -44,25 +45,21 @@ import dask
 import multiprocessing
 
 from .call_tree import DynamicFrame, StaticFrame, CallTree
-from .util import clip, timeseries, histogram, write_contents, dict_concat, right_pad, summary_stats, chunker, second
-import dask.distributed
-dask.config.set({"distributed.worker.daemon": False})
-client = dask.distributed.Client(
-    address=dask.distributed.LocalCluster(
-        n_workers=multiprocessing.cpu_count(),
-    ),
-)
-print(client.dashboard_link)
+from .util import clip, timeseries, histogram, write_dir, dict_concat, right_pad, summary_stats, chunker, second, omit, undefault_dict
 
-group = MemoizedGroup(size="40GiB", fine_grain_persistence=True)
+use_parallel = True
+
+group = MemoizedGroup(size="40GiB", fine_grain_persistence=False)
 
 def conditions2label(conditions: Mapping[str, Any]) -> str:
-    label = f"{conditions['scheduler']} {conditions['cpus']}x{conditions['cpu_freq']:.1f}GHz"
+    mode_str = f"-{conditions['mode']}" if "mode" in conditions and conditions["scheduler"] == "dynamic" else ""
+    label = f"{conditions['scheduler']}{mode_str} {conditions['cpus']}x{conditions['cpu_freq']:.1f}GHz"
     return label
 
 def dict_delayed(*keys):
     def decorator(func):
         def inner_func(*args, **kwargs):
+            # delayed_key = func(*args, **kwargs)
             delayed_key = dask.delayed(func)(*args, **kwargs)
             if len(keys) == 0:
                 return {func.__name__: delayed_key}
@@ -70,43 +67,22 @@ def dict_delayed(*keys):
                 return {keys[0]: delayed_key}
             else:
                 raise ValueError
+        inner_func.__name__ = func.__name__
         return inner_func
     return decorator
 
-
-def gen_config_conditions(metrics: Path, **kwargs: Any) -> Mapping[str, Any]:
-    config = yaml.load((metrics / "config.yaml").read_text(), Loader=yaml.SafeLoader)
-    return {"config": config, "conditions": config["conditions"]}
-
-def gen_call_trees(metrics: Path, **kwargs: Any) -> Mapping[str, Any]:
-    @dask.delayed
-    def collect(trees: List[Optional[CallTree]]):
-        return {
-            int(tree.thread_id): tree
-            for tree in trees
-            if tree is not None
-        }
-    return {"call_trees": collect([
-        dask.delayed(Memoized(CallTree.from_database, verbose=False, group=group))(path)
-        for path in (metrics / "frames").iterdir()
-    ])}
-
-@dict_delayed("static_to_dynamic")
 @memoize(verbose=False, group=group)
-def gen_static_to_dynamic(call_trees: Mapping[int, CallTree], **kwargs) -> Mapping[StaticFrame, List[DynamicFrame]]:
+def gen_static_to_dynamic(call_trees: Mapping[int, CallTree]) -> Mapping[StaticFrame, List[DynamicFrame]]:
     static_to_dynamic: Mapping[StaticFrame, List[DynamicFrame]] = collections.defaultdict(list)
     for tree in call_trees.values():
         for static_frame, dynamic_frames in tree.static_to_dynamic.items():
             static_to_dynamic[static_frame].extend(dynamic_frames)
     return dict(static_to_dynamic)
 
-@dict_delayed()
-@memoize(verbose=False, group=group)# @ch_time_block.decor()
-def plot_callgraph(
+def gen_callgraph_plot(
         output_dir: Path,
         call_trees: Mapping[int, CallTree],
         static_to_dynamic: Mapping[StaticFrame, List[DynamicFrame]],
-        **kwargs: Any,
 ) -> None:
     """Generate a visualization of the callgraph."""
     total_time = sum([tree.root.cpu_time for tree in call_trees.values()])
@@ -136,14 +112,12 @@ def plot_callgraph(
     graphviz.write(dot_path)
     graphviz.draw(img_path, prog="dot")
 
-@dict_delayed("compute_times")
-@memoize(verbose=False, group=group)
+@ch_time_block.decor()
 def gen_compute_times(
         output_dir: Path,
         call_trees: Mapping[int, CallTree],
         static_to_dynamic: Mapping[StaticFrame, List[DynamicFrame]],
         conditions: Mapping[str, Any],
-        **kwargs: Any,
 ) -> Mapping[StaticFrame, Mapping[str, Any]]:
     top_level_fn_names = {
         "callback",
@@ -156,7 +130,7 @@ def gen_compute_times(
     for tree in call_trees.values():
         for static_frame in anytree.PreOrderIter(tree.root.static_frame):
             fn_name_good = static_frame.function_name in top_level_fn_names or static_frame.function_name.startswith("_")
-            plugin_name_good = static_frame.plugin != "1" or not conditions["scheduler"] in {"static", "dynamic"}
+            plugin_name_good = static_frame.plugin != "1"
             if fn_name_good and plugin_name_good:
                 dynamic_frames = tree.static_to_dynamic[static_frame]
                 cpu_times = np.array([dynamic_frame.cpu_time for dynamic_frame in dynamic_frames])
@@ -170,13 +144,10 @@ def gen_compute_times(
                 }
     return compute_times
 
-@dict_delayed()
-@memoize(verbose=False, group=group)# @ch_time_block.decor()
-def plot_compute_times(
+def gen_compute_times_plot(
         call_trees: Mapping[int, CallTree],
         compute_times: Mapping[StaticFame, Mapping[str, Any]],
         output_dir: Path,
-        **kwargs: Any,
 ) -> Mapping[str, Any]:
     total_time = sum([tree.root.cpu_time for tree in call_trees.values()])
     cpu_timer_calls = sum([tree.calls for tree in call_trees.values()])
@@ -197,28 +168,29 @@ def plot_compute_times(
         )
 
     compute_dir = output_dir / "compute_times"
-    write_contents({
-        compute_dir / "compute_times.txt": "\n".join([
-            f"threads: {len(call_trees)}",
-            f"cpu overhead estimate: {cpu_timer_overhead / 1e6:.1f}ms, total_time: {total_time / 1e6:.1f}ms, percent error: {cpu_timer_overhead / total_time * 100 if total_time != 0 else 0:.1f}%",
-            *map(second, sorted(map(summarize_compute_times, compute_times.items()))),
-        ]),
-        **{
-            compute_dir / "hist" / f"{frame.plugin_function(' ')}.png": histogram(
-                ys=data["cpu_time"] / 1e6,
-                xlabel=f"CPU Time (ms)",
-                title=f"Compute Time of {frame.plugin_function(' ')}"
-            )
-            for frame, data in compute_times.items()
-        },
-        **{
-            compute_dir / "ts" / f"{frame.plugin_function(' ')}.png": timeseries(
-                ts=data["ts"],
-                ys=data["cpu_time"] / 1e6,
-                ylabel=f"CPU Time (ms)",
-                title=f"Compute Time of {frame.plugin_function(' ')}"
-            )
-            for frame, data in compute_times.items()
+    write_dir({
+        output_dir / "compute_times": {
+            "summary.txt": "\n".join([
+                f"threads: {len(call_trees)}",
+                f"cpu overhead estimate: {cpu_timer_overhead / 1e6:.1f}ms, total_time: {total_time / 1e6:.1f}ms, percent error: {cpu_timer_overhead / total_time * 100 if total_time != 0 else 0:.1f}%",
+                *map(second, sorted(map(summarize_compute_times, compute_times.items()))),
+            ]),
+            **{
+                f"{frame.plugin_function(' ')}": {
+                    "hist": histogram(
+                        ys=data["cpu_time"] / 1e6,
+                        xlabel=f"CPU Time (ms)",
+                        title=f"Compute Time of {frame.plugin_function(' ')}"
+                    ),
+                    "ts": timeseries(
+                        ts=data["ts"],
+                        ys=data["cpu_time"] / 1e6,
+                        ylabel=f"CPU Time (ms)",
+                        title=f"Compute Time of {frame.plugin_function(' ')}"
+                    ),
+                }
+                for frame, data in compute_times.items()
+            },
         },
     })
 
@@ -227,11 +199,8 @@ class EdgeType(Enum):
     async_ = 2
     sync = 3
 
-@dict_delayed("dynamic_dfg")
-@memoize(verbose=False, group=group)# @ch_time_block.decor()
 def gen_dynamic_dfg(
         call_trees: Mapping[int, CallTree],
-        **kwargs: Any,
 ) -> Mapping[str, Any]:
     dynamic_dfg = nx.DiGraph()
 
@@ -291,15 +260,13 @@ def gen_dynamic_dfg(
                     )
                 else:
                     warnings.warn(f"cb: {data_id} from {frame.static_frame.plugin} not found", UserWarning)
+
     return dynamic_dfg
 
 
-@dict_delayed("static_dfg")
-@memoize(verbose=False, group=group)# @ch_time_block.decor()
 def gen_static_dfg(
         call_trees: Mapping[int, CallTree],
         dynamic_dfg,
-        **kwargs: Any,
 ) -> Mapping[str, Any]:
     static_dfg = nx.DiGraph()
     for src, dst, edge_attrs in dynamic_dfg.edges(data=True):
@@ -310,12 +277,9 @@ def gen_static_dfg(
         )
     return static_dfg
 
-@dict_delayed()
-@memoize(verbose=False, group=group)# @ch_time_block.decor()
-def plot_dfg(
+def gen_dfg_plot(
         static_dfg,
         output_dir: Path,
-        **kwargs: Any
 ) -> Mapping[str, Any]:
 
     plugin_to_nodes: Dict[str, List[StaticFrame]] = collections.defaultdict(list)
@@ -371,13 +335,10 @@ def plot_dfg(
     static_dfg_graphviz.draw(img_path, prog="dot")
 
 
-@dict_delayed("path_static_to_dynamic")
-@memoize(verbose=False, group=group)# @ch_time_block.decor()
 def gen_path_static_to_dynamic(
         static_dfg,
         dynamic_dfg,
         static_to_dynamic,
-        **kwargs
 ) -> Any:
     path_static_to_dynamic: Mapping[
         Tuple[StaticFrame, ...], List[Tuple[DynamicFrame, ...]]
@@ -448,11 +409,23 @@ def gen_path_static_to_dynamic(
     # TODO: compute how many puts are "used/ignored"
     return dict(path_static_to_dynamic_freshest)
 
-@dict_delayed("important_paths")
-@memoize(verbose=False, group=group)# @ch_time_block.decor()
+@memoize(verbose=False, group=group)
+def all_dfg(call_trees, output_dir, static_to_dynamic) -> Mapping[str, Any]:
+    dynamic_dfg = gen_dynamic_dfg(call_trees)
+    static_dfg = gen_static_dfg(call_trees, dynamic_dfg)
+    # gen_dfg_plot(static_dfg, output_dir)
+    path_static_to_dynamic = gen_path_static_to_dynamic(static_dfg, dynamic_dfg, static_to_dynamic)
+    return path_static_to_dynamic
+
+important_path_signatures: Mapping[str, List[int]] = {
+    "CC":     (7,) * 2 +            (3,) * 3 +            (6,) * 4,
+    "Render": (7,) * 2 +            (3,) * 3 + (5,) * 2 + (6,) * 6,
+    "Cam":    (8,) * 2 + (2,) * 3 + (3,) * 2 +            (6,) * 4,
+}
+
+@ch_time_block.decor()
 def gen_important_paths(
         path_static_to_dynamic,
-        **kwargs: Any,
 ) -> Any:
     def path_signature(path: Iterable[StaticFrame]) -> Tuple[int]:
         return tuple(int(frame.plugin) for frame in path)
@@ -466,34 +439,21 @@ def gen_important_paths(
             print(path_signature(path))
         raise KeyError()
 
-    important_path_signatures: Mapping[str, List[int]] = {
-        "CC":     (7,) * 2 +            (3,) * 3 +            (6,) * 4,
-        "Render": (7,) * 2 +            (3,) * 3 + (5,) * 2 + (6,) * 6,
-        "Cam":    (8,) * 2 + (2,) * 3 + (3,) * 2 +            (6,) * 4,
-    }
-
     return {
         name: find_path(path_static_to_dynamic.keys(), path_signature)
         for name, path_signature in important_path_signatures.items()
     }
 
-@dict_delayed("path_times")
-@memoize(verbose=False, group=group)
-def gen_path_times(
+@ch_time_block.decor()
+def gen_path_metrics(
         path_static_to_dynamic,
-        **kwargs: Any,
 ) -> Mapping[str, Any]:
-    path_times = {}
+    path_metrics = {}
     for static_path, dynamic_paths in path_static_to_dynamic.items():
-        data = (
-            np.array(
-                list(
-                    [node.wall_start for node in dynamic_path]
-                    + [dynamic_path[-1].wall_stop]
-                    for dynamic_path in dynamic_paths
-                )
-            )
-        )
+        data = np.array([
+            [node.wall_start for node in dynamic_path] + [dynamic_path[-1].wall_stop]
+            for dynamic_path in dynamic_paths
+        ])
 
         assert (data[1:] - data[:-1] < 0).sum() < len(
             data
@@ -503,23 +463,22 @@ def gen_path_times(
             data
         ) * 0.01, "column monotonicity is violated"
 
-        path_times[static_path] = {
+        path_metrics[static_path] = {
             "times": data,
             "rel_time": data - data[:, 0][:, np.newaxis],
             "latency": data[:, -1] - data[:, 0],
             "period": data[1:, -1] - data[:-1, -1],
             "rt": data[1:, -1] - data[:-1, 0],
         }
-    return path_times
+    return path_metrics
 
-all_metrics = ["latency", "period", "rt"]
+path_metric_names = ["latency", "period", "rt"]
 
-@dict_delayed()
-@memoize(verbose=False, group=group)# @ch_time_block.decor()
-def plot_paths(path_static_to_dynamic, important_paths, path_times, output_dir, **kwargs: Any):
+@ch_time_block.decor()
+def gen_path_metrics_plot(path_static_to_dynamic, important_paths, path_metrics, output_dir):
     def summarize(static_path: tuple[StaticFrame, ...]) -> str:
         dynamic_paths = path_static_to_dynamic[static_path]
-        data = path_times[static_path]
+        data = path_metrics[static_path]
         def link_str(i: int) -> str:
             frame_start = dynamic_paths[0][i].static_frame.plugin_function_topic("-")
             frame_end = dynamic_paths[0][i+1].static_frame.plugin_function_topic("-")
@@ -530,276 +489,138 @@ def plot_paths(path_static_to_dynamic, important_paths, path_times, output_dir, 
         return "\n".join([
             f"{len(dynamic_paths)}" + " -> ".join(frame.plugin for frame in static_path),
             "\n".join(link_str(i) for i in range(len(dynamic_paths[0]) - 1)),
-            "\n".join(f"{summary_stats(data[metric] / 1e6)}" for metric in all_metrics),
+            "\n".join(f"{summary_stats(data[metric] / 1e6)}" for metric in path_metric_names),
         ])
 
     chains_dir = output_dir / "chains"
-    write_contents({
-        **{
-            chains_dir / f"{name}.txt": summarize(static_path)
-            for name, static_path in important_paths.items()
+    write_dir({
+        output_dir / "chains": {
+            f"summary.txt": "\n".join(
+                "\n".join([
+                    name,
+                    summarize(static_path),
+                    "",
+                ])
+                for name, static_path in important_paths.items()
+            ),
+            **{
+                path_name: {
+                    metric_name: {
+                        "hist.png": histogram(
+                            ys=path_metrics[path][metric_name] / 1e6,
+                            xlabel=f"{metric_name} (ms)",
+                            title=f"{metric_name.capitalize()} of {path_name}",
+                        ),
+                        "ts.png": timeseries(
+                            ts=path_metrics[path]["times"][:, 0],
+                            ys=path_metrics[path][metric_name] / 1e6,
+                            ylabel=f"{metric_name} (ms)",
+                            title=f"{metric_name.capitalize()} of {path_name}",
+                        ),
+                    }
+                    for metric_name in path_metric_names
+                }
+                for path_name, path in important_paths.items()
+            },
         },
-        **dict_concat(
-            {
-                chains_dir / name / "hist"/ f"{metric}.png": histogram(
-                    ys=path_times[static_path][metric] / 1e6,
-                    xlabel=f"{metric} (ms)",
-                    title=f"{metric.capitalize()} of {name}",
-                )
-                for name, static_path in important_paths.items()
-            }
-            for metric in all_metrics
-        ),
-        **dict_concat(
-            {
-                chains_dir / name / "ts"/ f"{metric}.png": timeseries(
-                    ts=path_times[static_path]["times"][:, 0],
-                    ys=path_times[static_path][metric] / 1e6,
-                    ylabel=f"{metric} (ms)",
-                    title=f"{metric.capitalize()} of {name}",
-                )
-                for name, static_path in important_paths.items()
-            }
-            for metric in all_metrics
-        ),
     })
 
-@dict_delayed("proj_compute_times")
-def project_compute_times(
+def gen_project_compute_times(
         conditions: Mapping[str, Any],
         compute_times: Mapping[str, Any],
-        **kwargs,
-) -> Mapping[str, Any]:
+):
     return {
-        conditions["cpu_freq"]: {
+        frozendict(conditions): {
             frame.plugin_function(" "): {
-                metric: data[metric]
-                for metric in ["cpu_time", "wall_time"]
+                metric_name: [data[metric_name]]
+                for metric_name in ["cpu_time", "wall_time"]
             }
             for frame, data in compute_times.items()
         },
     }
 
-@dict_delayed("proj_path_times")
-def project_path_times(
+def gen_project_path_metrics(
         conditions: Mapping[str, Any],
         important_paths: Mapping[str, Any],
-        path_times,
-        **kwargs,
-) -> Mapping[str, Any]:
+        path_metrics,
+):
     return {
         frozendict(conditions): {
-            name: {
-                metric: path_times[static_path][metric]
-                for metric in all_metrics
+            path_name: {
+                metric_name: [path_metrics[path][metric_name]]
+                for metric_name in path_metric_names
             }
-            for name, static_path in important_paths.items()
+            for path_name, path in important_paths.items()
         },
     }
 
-@memoize(verbose=False, group=group)# @ch_time_block.decor()
-def agg_compute_times(trials: Trials) -> Mapping[str, Any]:
-    compute_times: Mapping[str, List[np.array]] = collections.defaultdict(list)
-    for trial in trials.each:
-        for frame, data in compute_times.items():
-            compute_times[frame.plugin_function(" ")].append(data["cpu_time"])
-    compute_times_dir = trials.output_dir / "compute_times"
-
-    write_contents({
-        compute_times_dir / "summary.txt": "\n".join(
-            f"{label} {(len(times))}: {summary_stats(np.concatenate(times) / 1e6)}"
-            for label, times in compute_times.items()
-        ),
-        **{
-            compute_times_dir / "hist" / (label + ".png"): histogram(np.concatenate(times) / 1e6, "CPU Time (ms)", f"Compute Times of {label}")
-            for label, times in compute_times.items()
-        },
-    })
-    return {"compute_times": dict(compute_times)}
-
-import scipy.stats
-
-@memoize(verbose=False, group=group)# @ch_time_block.decor()
-def compare_compute_times(trials: Trials) -> Mapping[str, Any]:
-    keys = trials.each[0].output["compute_times"].keys()
-    for trial in trials.each:
-        keys &= compute_times.keys()
-    def diff(pair: Tuple[Trial, Trial]) -> Tuple[float, str]:
-        a, b = pair
-        a_keys = a.output["compute_times"].keys()
-        b_keys = b.output["compute_times"].keys()
-        for key in (a_keys & b_keys):
-            ks, p = scipy.stats.ks_2samp(a.output["compute_times"][key][1], b.output["compute_times"][key][1])
-            return p, f"- {a.output_dir!s} <-> {b.output_dir!s}: {p:.2f} {ks}"
-
-    compute_times = trials.output_dir / "compute_times"
-    write_contents({
-        compute_times / "consistency.txt": "\n".join(
-            f"# {key}\n" + "\n".join(map(second, sorted(map(diff, tqdm(itertools.combinations(trials.each, 2)))))) + "\n"
-            for key in keys
-        )
-    })
-    return {}
-
-@memoize(verbose=False, group=group)# @ch_time_block.decor()
-def agg_chain_metrics(trials: Trials) -> Mapping[str, Any]:
-    f = lambda: collections.defaultdict(lambda: {"latency": [], "period": [], "rt": []})
-    important_chain_names = trials.each[0].output["important_paths"].keys()
-    conditions = set(frozendict(trial.config["conditions"]) for trial in trials.each)
-    chain_metrics: Mapping[str, Mapping[frozendict, Mapping[str, List[np.array]]]] = {
-        name: f()
-        for name in important_chain_names
+def collect(trees: List[Optional[CallTree]]):
+    return {
+        int(tree.thread_id): tree
+        for tree in trees
+        if tree is not None
     }
-    for trial in trials.each:
-        conditions = frozendict(trial.config["conditions"])
-        for name, static_path in trial.output["important_paths"].items():
-            for metric in all_metrics:
-                chain_metrics[name][conditions][metric].append(
-                    trial.output["path_times"][static_path][metric]
-                )
-
-    chains_dir = trials.output_dir / "chains"
-
-    def summarize(static_path: tuple[StaticFrame, ...]) -> str:
-        dynamic_paths = trial.output["path_static_to_dynamic"][static_path]
-        data = trial.output["path_times"][static_path]
-        return "\n".join([
-            "\n".join(f"{summary_stats(data[metric] / 1e6)}" for metric in all_metrics),
-        ])
 
 
-    write_contents({
-        **{
-            chains_dir / f"summary.txt": "\n".join(
-                "\n".join([f"# {condition}"] + [
-                    "\n".join([
-                        " ".join([
-                            right_pad("{name} {metric} ({len(np.concat(chain_metrics[name][condition][metric]))})", length=25),
-                            print_dist(np.concat(chain_metrics[name][condition][metric]))
-                        ])
-                        for metric in all_metrics
-                    ])
-                    for name in important_chain_names
-                ] + [""])
-                for condition in conditions
-            )
-        },
-        **dict_concat(
-                "\n".join([f"# {condition}"] + [
-                    "\n".join([
-                        " ".join([
-                            right_pad("{name} {metric} ({len(np.concat(chain_metrics[name][condition][metric]))})", length=25),
-                            print_dist(np.concat(chain_metrics[name][condition][metric]))
-                        ])
-                        for metric in all_metrics
-                    ])
-                    for name in important_chain_names
-                ] + [""])
-                for condition in conditions
-            ),
-    })
-    # TODO: write metrics
-    # TODO: plot hist
-    return {"chain_metrics": {key: dict(val) for key, val in chain_metrics.items()}}
+def analyze_trial_delayed(metrics: Path, output_dir: Path) -> Mapping[str, dask.Delayed[Any]]:
+    delayed = dask.delayed if globals()["use_parallel"] else lambda x: x
 
-@memoize(verbose=False, group=group)# @ch_time_block.decor()
-def compare_chain_metrics(trials: Trials) -> Mapping[str, Any]:
-    conditions = set(
-        frozendict({
-            key: val
-            for key, val in condition
-            if key != "scheduler"
-        })
-        for condition in trials.output["by_conditions"].keys()
-    )
-    all_schedulers = ["default", "priority", "manual", "static", "dynamic"]
-    for condition in conditions:
-        schedulers = [
-            scheduler
-            for scheduler in all_schedulers
-            if frozendict(condition.copy(scheduler=scheduler)) in trial.output["by_conditions"]
-        ]
-        print(f"## {conditions2label(condition)}")
-        for sched_a, sched_b in itertools.combinations(schedulers, 2):
-            trial_a = trials.output["compute"]
-            for name in a.output["important_chains"].keys():
-                for metric in all_metrics:
-                    a_data = trial_a["path_times"][trial_a.output["important_paths"][name]][metric]
-                    b_data = trial_b["path_times"][trial_b.output["important_paths"][name]][metric]
-                    np.median(a_data) / np.median(b_data)
-                    np.stddev(a_data) / np.stddev(b_data)
-    return {}
+    (output_dir / "source").write_text(str(metrics.resolve()))
 
-analyze_trial_fns: List[Callable[[Trial], None]] = [
-    gen_config_conditions,
-    gen_call_trees,
-    gen_static_to_dynamic,
-    plot_callgraph,
-    gen_compute_times,
-    gen_dynamic_dfg,
-    gen_static_dfg,
-    plot_dfg,
-    gen_path_static_to_dynamic,
-    gen_important_paths,
-    gen_path_times,
-    plot_paths,
-    plot_compute_times,
-    project_compute_times,
-    project_path_times,
-]
+    config = yaml.load((metrics / "config.yaml").read_text(), Loader=yaml.SafeLoader)
+    conditions = config["conditions"]
 
-def analyze_trial(metrics: Path, output_dir: Path) -> Mapping[str, dask.Delayed[Any]]:
-    dct = {"metrics": metrics, "output_dir": output_dir}
-    print(metrics.name)
-    for analyze_trial in analyze_trial_fns:
-        dct.update(analyze_trial(**dct))
-    return dct
+    call_trees = delayed(collect)([
+        delayed(Memoized(CallTree.from_database, verbose=False, group=group))(path)
+        for path in (metrics / "frames").iterdir()
+    ])
+    static_to_dynamic = delayed(gen_static_to_dynamic)(call_trees)
+    compute_times = delayed(gen_compute_times)(output_dir, call_trees, static_to_dynamic, conditions)
+    path_static_to_dynamic = delayed(all_dfg)(call_trees, output_dir, static_to_dynamic)
+    important_paths = delayed(gen_important_paths)(path_static_to_dynamic)
+    path_metrics = delayed(gen_path_metrics)(path_static_to_dynamic)
+    path_metrics_plot = delayed(gen_path_metrics_plot)(path_static_to_dynamic, important_paths, path_metrics, output_dir)
 
-# def analyze_trials(all_metrics: List[Path], output_dir: Path) -> None:
-#     lst = [analyze_trial(metrics, metrics) for metrics in all_metrics]
-#     print("dask.compute")
-#     dask.compute(lst)
-#     print("dask.compute done")
-#     client.shutdown()
+    compute_times_plot = delayed(gen_compute_times_plot)(call_trees, compute_times, output_dir)
+    # callgraph_plot = delayed(gen_callgraph_plot)(output_dir, call_trees, static_to_dynamic)
+
+    proj_compute_times = delayed(gen_project_compute_times)(conditions, compute_times)
+    proj_path_metrics = delayed(gen_project_path_metrics)(conditions, important_paths, path_metrics)
+    return {
+        "conditions": conditions,
+        "proj_compute_times": proj_compute_times,
+        "proj_path_metrics": proj_path_metrics,
+        "path_metrics_plot": path_metrics_plot,
+        "compute_times_plot": compute_times_plot,
+        "condition_trials": {frozendict(conditions): [output_dir]},
+    }
 
 def combine(projected_trials: Iterable[Mapping[str, Any]]) -> Mapping[str, Any]:
-    key_condition_name_metric_series = {
+    data = {
         "proj_compute_times": collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(list))),
-        "proj_path_times": collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(list))),
+        "proj_path_metrics": collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(list))),
+        "condition_trials": collections.defaultdict(list)
     }
     for trial in projected_trials:
-        for cpu_freq, name_metric_series in trial["proj_compute_times"].items():
+        for condition, equiv_trials in trial["condition_trials"].items():
+            data["condition_trials"][condition].extend(equiv_trials)
+        for conditions, name_metric_series in trial["proj_compute_times"].items():
             for name, metric_series in name_metric_series.items():
                 for metric, series in metric_series.items():
-                    key_condition_name_metric_series["proj_compute_times"][cpu_freq][name][metric].append(series)
-        for conditions, name_metric_series in trial["proj_path_times"].items():
+                    data["proj_compute_times"][conditions][name][metric].extend(series)
+        for conditions, name_metric_series in trial["proj_path_metrics"].items():
             for name, metric_series in name_metric_series.items():
                 for metric, series in metric_series.items():
-                    key_condition_name_metric_series["proj_path_times"][conditions][name][metric].append(series)
+                    data["proj_path_metrics"][conditions][name][metric].extend(series)
     # Undo the defaultdict
-    return {
-        key: {
-            condition: {
-                name: {
-                    metric: series
-                    for metric, series in metric_series.items()
-                }
-                for name, metric_series in name_metric_series.items()
-            }
-            for condition, name_metric in condition_name_metric_series.items()
-        }
-        for key, condition_name_metric_series in  key_condition_name_metric_series.items()
-    }
+    return undefault_dict(data)
 
 @memoize(verbose=False, group=group)
-def gen_aggregate(all_metrics: List[Path]) -> Mapping[str, Any]:
-    return combine(
-        combine(dask.compute([
-            analyze_trial(metrics, metrics)
-            for metrics in metrics_group
-        ])[0])
-        for metrics_group in chunker(all_metrics, multiprocessing.cpu_count())
-    )
-
-def analyze_trials(all_metrics: List[Path], output_dir: Path) -> None:
-    aggregate = gen_aggregate(all_metrics)
+def analyze_trials_projection(metrics_group: Path) -> Mapping[str, Any]:
+    compute = dask.compute if globals()["use_parallel"] else lambda *args: args
+    ret = combine(compute([
+        analyze_trial_delayed(metrics, metrics)
+        for metrics in metrics_group
+    ])[0])
+    gc.collect()
+    return ret

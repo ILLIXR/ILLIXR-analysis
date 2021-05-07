@@ -219,8 +219,7 @@ def set_index_with_uniquifier(
         .sort_index(inplace=False)
     )
 
-def summary_stats(data: np.array, digits: int = 1) -> str:
-    percentiles = [25, 75, 90, 95]
+def summary_stats(data: np.array, digits: int = 1, percentiles: List[float] = [25, 75, 90, 95]) -> str:
     percentiles_str = " " + " ".join(
         f"[{percentile}%]={np.percentile(data, percentile):,.{digits}f}"
         for percentile in percentiles
@@ -240,15 +239,19 @@ def dict_concat(dicts: Iterable[Mapping[Key, Val]]) -> Mapping[Key, Val]:
         for key, val in dict.items()
     }
 
-def write_contents(content_map: Mapping[Path, Union[str, bytes]]) -> None:
+def write_dir(content_map: Mapping[Path, Any]) -> None:
     for path, content in content_map.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
-            path.unlink()
+            shutil.rmtree(path)
         if isinstance(content, str):
             path.write_text(content)
-        else:
+        elif isinstance(content, bytes):
             path.write_bytes(content)
+        elif isinstance(content, dict):
+            write_dir({path / key: subcontent for key, subcontent in content.items()})
+        else:
+            raise TypeError(type(content))
 
 def histogram(
         ys: np.array,
@@ -339,3 +342,12 @@ def track_memory_usage():
             return ret
         return inner_function
     return decorator
+
+def omit(dct: Mapping[Key, Val], keys: Set[Key]) -> Mapping[Key, Val]:
+    return {key: val for key, val in dct.items() if key not in keys}
+
+def undefault_dict(dct):
+    if isinstance(dct, (dict, collections.defaultdict)):
+        return dict((key, undefault_dict(val)) for key, val in dct.items())
+    else:
+        return dct

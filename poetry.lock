@@ -953,7 +953,7 @@ testing = ["pytest (>=4.6)", "pytest-checkdocs (>=1.2.3)", "pytest-flake8", "pyt
 [metadata]
 lock-version = "1.1"
 python-versions = ">=3.8,<3.10"
-content-hash = "579dfe995507cb436a92113a6f1b3f80a2fb9de2c1fbdb89a1dcf93390a46f8e"
+content-hash = "68ba395e2b674084d1d4a70d687fb8da6ec30e909039528e21b71324bf483b8a"
 
 [metadata.files]
 anytree = [

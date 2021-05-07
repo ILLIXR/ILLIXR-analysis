@@ -74,6 +74,7 @@ disable=
     no-member,
 	not-callable,
 	undefined-variable,
+	no-value-for-parameter,
 
     # We use classes like structs, so many will have no public methods.
     # I actually want to encourage fewer methods.

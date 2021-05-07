@@ -1,0 +1,8 @@
+- charmonium.cache bugs
+- Don't save on errors
+- OOM crashes
+- Segfault
+- Lock contention
+- Serialization of tree costs
+- VCS was not fine grained enough
+- Lose control over manual invalidation of the cache

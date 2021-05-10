@@ -16,6 +16,7 @@ import typer
 import charmonium.time_block as ch_time_block
 
 from illixr.analysis.analyze_trials2 import analyze_trials
+from illixr.analysis.analyze_trials3 import analyze_trials3
 from illixr.analysis.util import command_exists
 import dask
 import webbrowser
@@ -51,7 +52,8 @@ def main(
         for path in list(metrics_dir.iterdir()) + extra_metrics
         if path.is_dir() and (path / "log").exists()
     ]
-    trials = analyze_trials(candidates, metrics_dir, chunk_size)
+    # trials = analyze_trials(candidates, metrics_dir, chunk_size)
+    analyze_trials3(candidates, metrics_dir, chunk_size)
     # client.shutdown()
 
 

@@ -28,6 +28,7 @@ from typing import (
     Tuple,
     TypeVar,
     Union,
+    IO,
 )
 import warnings
 import itertools
@@ -243,10 +244,16 @@ def write_dir(content_map: Mapping[Path, Any]) -> None:
     for path, content in content_map.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
-            shutil.rmtree(path)
+            print("deleting", path)
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
         if isinstance(content, str):
+            print("writing", path)
             path.write_text(content)
         elif isinstance(content, bytes):
+            print("writing", path)
             path.write_bytes(content)
         elif isinstance(content, dict):
             write_dir({path / key: subcontent for key, subcontent in content.items()})
@@ -351,3 +358,8 @@ def undefault_dict(dct):
         return dict((key, undefault_dict(val)) for key, val in dct.items())
     else:
         return dct
+
+def capture_file(thunk: Callable[IO[bytes], None]) -> bytes:
+    fake_file = io.BytesIO()
+    thunk(fake_file)
+    return fake_file.getvalue()

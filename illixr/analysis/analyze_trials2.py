@@ -25,10 +25,10 @@ def compare_compute_times(output_dir: Path, proj_compute_times: Mapping[float, M
                         " ".join([
                             right_pad(label, 20),
                             "len:",
-                            right_pad(str(len(data["wall_time"])), 9),
-                            "cpu_time:  ",
+                            str(len(data["wall_time"])),
+                            "cpu_time:",
                             right_pad(summary_stats(np.concatenate(data["cpu_time" ]) / 1e6, digits=2), 95),
-                            "wall_time: ",
+                            "wall_time:",
                             right_pad(summary_stats(np.concatenate(data["wall_time"]) / 1e6, digits=2), 95),
                         ])
                         for label, data in label_data.items()
@@ -83,7 +83,7 @@ def compare_path_metrics(output_dir: Path, proj_path_metrics: Mapping[frozendict
     for conditions in proj_path_metrics.keys():
         sched_dict = frozendict({
             "scheduler": conditions["scheduler"],
-            **({"swap": conditions["swap"] if "swap" in conditions else {}})
+            **({"swap": conditions["swap"]} if "swap" in conditions else {})
         })
         scheduler_conditions[sched_dict].append(conditions)
 
@@ -98,14 +98,17 @@ def compare_path_metrics(output_dir: Path, proj_path_metrics: Mapping[frozendict
         conditions2 = [conditions for conditions in proj_path_metrics.keys() if conditions2 == conditions][0]
         a = np.concatenate(proj_path_metrics[conditions1][name][metric])
         b = np.concatenate(proj_path_metrics[conditions2][name][metric])
+        assert conditions1["cpu_freq"] == conditions2["cpu_freq"]
         return " ".join([
+            right_pad("{conditions1['cpu_freq']}GHz", 8),
             right_pad(metric, 8),
+            right_pad(name, 8),
             f"p={scipy.stats.ttest_ind(a, b, equal_var=False)[1]:.4f}",
             f"mean/mean={a.mean() / b.mean():.2f}",
             f"stddev/stddev={a.std() / b.std():.2f}",
-            "med/med={a.median() / b.median():.2f}",
+            f"med/med={np.median(a) / np.median(b):.2f}",
             *[
-                right_pad(summary_stats(series, percentiles=[75]), 80)
+                right_pad(summary_stats(series / 1e6, percentiles=[75]), 80)
                 for series in [a, b]
             ]
         ])
@@ -119,7 +122,6 @@ def compare_path_metrics(output_dir: Path, proj_path_metrics: Mapping[frozendict
             condition1 = frozendict(**condition, **scheduler1)
             condition2 = frozendict(**condition, **scheduler2)
             yield "\n".join([
-                f"{condition['cpu_freq']}GHz",
                 *[
                     inner_summarize_diff(condition1, condition2, name, metric_name)
                     for name in important_path_signatures.keys()
@@ -137,13 +139,13 @@ def compare_path_metrics(output_dir: Path, proj_path_metrics: Mapping[frozendict
                     *map(second, sorted([
                         (name, " ".join([
                             right_pad(name, 6),
-                            "len: {len(data['latency'])}",
+                            f"len: {len(data['latency'])}",
                             "latency:",
-                            right_pad(summary_stats(np.concatenate(data["latency" ]) / 1e6, percentiles=[75]), 95),
+                            right_pad(summary_stats(np.concatenate(data["latency" ]) / 1e6, percentiles=[75]), 58),
                             "period:",
-                            right_pad(summary_stats(np.concatenate(data["period"]) / 1e6, percentiles=[75]), 95),
+                            right_pad(summary_stats(np.concatenate(data["period"]) / 1e6, percentiles=[75]), 58),
                             "rt:",
-                            right_pad(summary_stats(np.concatenate(data["rt"]) / 1e6, percentiles=[75]), 95),
+                            right_pad(summary_stats(np.concatenate(data["rt"]) / 1e6, percentiles=[75]), 58),
                         ]))
                         for name, data in name_data.items()
                     ])),
@@ -158,11 +160,11 @@ def compare_path_metrics(output_dir: Path, proj_path_metrics: Mapping[frozendict
                         "\n".join([
                             f"{label} {metric}:",
                             "".join([
-                                right_pad("{p:.4f}")
-                                for p, ks in sorted(
-                                        scipy.stats.ks_2samp(a, b)[::-1]
+                                f"{p:.4f}"
+                                for p in sorted(map(second, (
+                                        scipy.stats.ks_2samp(a, b)
                                         for a, b in itertools.combinations(series, 2)
-                                )
+                                )))
                             ])
                         ])
                         for label, data in label_data.items()

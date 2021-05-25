@@ -28,7 +28,7 @@ import multiprocessing
 # See https://clig.dev/ for guidelines
 @app.command()
 def main(
-    metrics_dir: Path,
+    dir_of_metrics_dirs: Path,
     chunk_size: int = typer.Option(10, "--chunk-size"),
     verify: bool = typer.Option(
         False, "--verify", help="Preform extra checks on the data"
@@ -39,6 +39,8 @@ def main(
 
     import dask.multiprocessing
     dask.config.set(scheduler='processes')  # overwrite default with multiprocessing scheduler
+
+    # This is for the distributed scheduler
     # dask.config.set({"distributed.worker.daemon": False})
     # client = dask.distributed.Client(
     #     address=dask.distributed.LocalCluster(
@@ -47,13 +49,16 @@ def main(
     # )
     # print(client.dashboard_link)
     # webbrowser.open(client.dashboard_link)
+
     candidates = [
         path
-        for path in list(metrics_dir.iterdir()) + extra_metrics
+        for path in list(dir_of_metrics_dirs.iterdir()) + extra_metrics
         if path.is_dir() and (path / "log").exists()
     ]
-    # trials = analyze_trials(candidates, metrics_dir, chunk_size)
-    analyze_trials3(candidates, metrics_dir, chunk_size)
+    trials = analyze_trials(candidates, dir_of_metrics_dirs, chunk_size)
+    # analyze_trials3(candidates, metrics_dir, chunk_size)
+
+    # For the distributed scheduler:
     # client.shutdown()
 
 

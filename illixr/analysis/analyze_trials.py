@@ -648,7 +648,6 @@ def combine(projected_trials: Iterable[Mapping[str, Any]]) -> Mapping[str, Any]:
 
 @memoize(verbose=False, group=group)
 def analyze_trials_projection(metrics_group: Path) -> Mapping[str, Any]:
-    0
     compute = dask.compute if globals()["use_parallel"] else lambda *args: args
     ret = combine(compute([
         analyze_trial_delayed(metrics, metrics)

@@ -1,6 +1,9 @@
 ## Installation
 
 ```
+# Install basic prerequisites
+$ sudo apt-get install -y git python3-dev graphviz libgraphviz-dev pkg-config
+
 # Clone the code
 $ git clone --recursive git@github.com:ILLIXR/ILLIXR-analysis.git
 $ cd ILLIXR-analysis

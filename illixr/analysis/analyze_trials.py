@@ -273,7 +273,7 @@ def gen_static_dfg(
         dynamic_dfg,
 ) -> Mapping[str, Any]:
     static_dfg = nx.DiGraph()
-    for src, dst, edge_attrs in dynamic_dfg.edges(data=True):
+    for src, dst, edge_attrs in dynamic_dfg.edges(data=True): 
         static_dfg.add_edge(
             src.static_frame,
             dst.static_frame,
@@ -312,7 +312,6 @@ def gen_dfg_plot(
                 }[edge_attrs["type"]],
             )
             for node in [src, dst]:
-                # assert plugin
                 plugin_to_nodes[node.plugin].append(node)
                 static_dfg_graphviz.get_node(frame_to_id(node)).attr[
                     "label"

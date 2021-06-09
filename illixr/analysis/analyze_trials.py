@@ -20,7 +20,7 @@ from typing import (
 )
 
 import anytree  # type: ignore
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt #type: ignore
 import networkx as nx  # type: ignore
 import numpy
 import pygraphviz  # type: ignore
@@ -171,7 +171,7 @@ def data_flow_graph(trial: Trial) -> None:
                     # print(f"cb: {data_id} not found")
 
     static_dfg = nx.DiGraph()
-    for src, dst, edge_attrs in dynamic_dfg.edges(data=True):
+    for src, dst, edge_attrs in dynamic_dfg.edges(data=True): 
         static_dfg.add_edge(
             src.static_frame,
             dst.static_frame,
@@ -218,7 +218,7 @@ def data_flow_graph(trial: Trial) -> None:
             )
             for node in [src, dst]:
                 plugin = get_plugin(node)
-                # assert plugin
+                assert plugin
                 plugin_to_nodes[plugin].append(node)
                 static_dfg_graphviz.get_node(frame_to_id(node)).attr[
                     "label"
@@ -377,7 +377,7 @@ def data_flow_graph(trial: Trial) -> None:
         # print(numpy.std(latency, axis=0))
 
 
-def data_flow_bar_chart(static_path, dynamic_paths, latencies) -> None:
+def data_flow_bar_chart(static_path:Tuple[StaticFrame, ...], dynamic_paths: List[Tuple[DynamicFrame, ...]], latencies: numpy.ndarray) -> None:
     rowNum = -1.5
     coIndex = 0
     fig, ax = plt.subplots()

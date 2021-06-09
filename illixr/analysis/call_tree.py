@@ -169,7 +169,7 @@ class CallTree:
             dups = index.duplicated()
             if dups.any():
                 print(index[dups])
-                import IPython; IPython.embed()
+                import IPython; IPython.embed() #type: ignore
             frames2 = sort_and_set_index(frames, ["thread_id", "frame"], verify_integrity=True)
             frames3 = to_categories(frames2, ["function_name", "topic_name"])
             frames = frames3

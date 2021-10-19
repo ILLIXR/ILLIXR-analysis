@@ -5,8 +5,6 @@ from __future__ import annotations
 import collections
 import contextlib
 import sqlite3
-import dask.bag
-from pathlib import Path
 from typing import (
     Any,
     Dict,
@@ -53,20 +51,35 @@ class StaticFrame(anytree.NodeMixin):  # type: ignore
     _topic_name: Optional[str]
 
     def __hash__(self) -> int:
-        return hash((
+        return (
+            hash(
+                (
+                    self.function_name,
+                    self.file_name,
+                    self.line,
+                    self.plugin,
+                    self.topic_name,
+                )
+            )
+            ^ (0 if self.parent is not None else hash(self.parent))
+        )
+
+    def __determ_hash__(self) -> Any:
+        return (
             self.function_name,
             self.file_name,
             self.line,
             self.plugin,
             self.topic_name,
-        )) ^ (0 if self.parent is not None else hash(self.parent))
-
-    def __determ_hash__(self) -> Any:
-        return (self.function_name, self.file_name, self.line, self.plugin, self.topic_name, self.parent)
+            self.parent,
+        )
 
     def __eq__(self, other: object) -> bool:
         attrs = ["function_name", "file_name", "line", "plugin", "topic_name"]
-        return all(getattr(self, attr) == getattr(other, attr) for attr in attrs) and self.parent == other.parent
+        return (
+            all(getattr(self, attr) == getattr(other, attr) for attr in attrs)
+            and self.parent == other.parent
+        )
 
     def __neq__(self, other: DynamicFrame) -> bool:
         return not self == other
@@ -75,12 +88,12 @@ class StaticFrame(anytree.NodeMixin):  # type: ignore
         plugin_str = self.plugin + sep if self.plugin else ""
         return f"{plugin_str}{self.function_name}"
 
-    def plugin_function_topic(self, sep: str="\n") -> str:
+    def plugin_function_topic(self, sep: str = "\n") -> str:
         plugin_str = self.plugin + sep if self.plugin else ""
         topic_str = sep + self.topic_name if self.topic_name else ""
         return f"{plugin_str}{self.function_name}{topic_str}"
 
-    def file_function_line(self, sep: str=":") -> str:
+    def file_function_line(self, sep: str = ":") -> str:
         return f"{self.file_name}{sep}{self.line}{sep}{self.function_name}"
 
     def __str__(self) -> str:
@@ -126,7 +139,8 @@ class StaticFrame(anytree.NodeMixin):  # type: ignore
 
     @property
     def file_name(self) -> str:
-        return "/".join(self._file_name.split('/')[-2:])
+        return "/".join(self._file_name.split("/")[-2:])
+
 
 class DynamicFrame(anytree.NodeMixin):  # type: ignore
     """A dynamic stack frame."""
@@ -174,7 +188,9 @@ class DynamicFrame(anytree.NodeMixin):  # type: ignore
         self._frame_id = index[1]
         self.cpu_time = row["cpu_stop"] - row["cpu_start"]
         self.wall_time = row["wall_stop"] - row["wall_start"]
-        self.wall_start = row["wall_start"] if not is_custom_time else row["custom_time"]
+        self.wall_start = (
+            row["wall_start"] if not is_custom_time else row["custom_time"]
+        )
         self.wall_stop = row["wall_stop"] if not is_custom_time else row["custom_time"]
         self.static_frame = static_frame
         self.serial_no = row["serial_no"]
@@ -219,11 +235,16 @@ class CallTree:
         """
 
         with contextlib.closing(sqlite3.connect(database_url)) as conn:
-            frames = pandas.read_sql_query("SELECT * FROM finished;", conn)
+            try:
+                frames = pandas.read_sql_query("SELECT * FROM finished;", conn)
+            except pandas.io.sql.DatabaseError as e:
+                raise RuntimeError(f"{database_url} doesn't work") from e
             index = frames[["thread_id", "frame"]]
             dups = index.duplicated()
             assert not dups.any()
-            frames2 = sort_and_set_index(frames, ["thread_id", "frame"], verify_integrity=True)
+            frames2 = sort_and_set_index(
+                frames, ["thread_id", "frame"], verify_integrity=True
+            )
             frames3 = to_categories(frames2, ["function_name", "topic_name"])
             frames = frames3
 
@@ -251,10 +272,10 @@ class CallTree:
             StaticFrame, List[DynamicFrame]
         ] = collections.defaultdict(list)
         for index, row in tqdm(
-                frames.iterrows(),
-                total=len(frames),
-                desc=f"Reconstrucing stack {thread_id}",
-                unit="frame",
+            frames.iterrows(),
+            total=len(frames),
+            desc=f"Reconstrucing stack {thread_id}",
+            unit="frame",
         ):
             # Get parent as DynamicFrame or None
             assert (not verify) or row["caller"] == 0 or row["caller"] < index[1]

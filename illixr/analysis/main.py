@@ -3,31 +3,21 @@
 This module should only call out to the highest-level of functions
 defined in other modules.  """
 
-import contextlib
 import shlex
 import subprocess
 import sys
 from pathlib import Path
-import shutil
 from typing import List, Union
 
-import dask.bag
 import typer
-import charmonium.time_block as ch_time_block
 
-from illixr.analysis.analyze_trials2 import analyze_trials
-from illixr.analysis.analyze_trials3 import analyze_trials3
 from illixr.analysis.util import command_exists
-import dask
-import webbrowser
 
 app = typer.Typer()
 
-import multiprocessing
-
 # See https://clig.dev/ for guidelines
 @app.command()
-def main(
+def analyze_trials(
     dir_of_metrics_dirs: Path,
     chunk_size: int = typer.Option(10, "--chunk-size"),
     verify: bool = typer.Option(
@@ -38,7 +28,10 @@ def main(
     """Runs every analysis on every trial."""
 
     import dask.multiprocessing
-    dask.config.set(scheduler='processes')  # overwrite default with multiprocessing scheduler
+
+    dask.config.set(
+        scheduler="processes"
+    )  # overwrite default with multiprocessing scheduler
 
     # This is for the distributed scheduler
     # dask.config.set({"distributed.worker.daemon": False})
@@ -53,14 +46,76 @@ def main(
     candidates = [
         path
         for path in list(dir_of_metrics_dirs.iterdir()) + extra_metrics
-        if path.is_dir() and (path / "log").exists()
+        if path.is_dir() and (path / "log").exists() and not (path / "source").exists()
+        # path / log means data is there
     ]
+
+    # from .analyze_trials import just_read
+    # just_read(candidates)
+
+    from illixr.analysis.analyze_trials2 import analyze_trials
     trials = analyze_trials(candidates, dir_of_metrics_dirs, chunk_size)
-    # analyze_trials3(candidates, metrics_dir, chunk_size)
 
     # For the distributed scheduler:
     # client.shutdown()
 
+@app.command()
+def analyze_trials3(
+    dir_of_metrics_dirs: Path,
+    chunk_size: int = typer.Option(10, "--chunk-size"),
+    verify: bool = typer.Option(
+        False, "--verify", help="Preform extra checks on the data"
+    ),
+    extra_metrics: List[Path] = typer.Option([], "--also"),
+) -> None:
+    """Runs analyze_trials3 on every trial."""
+    candidates = [
+        path
+        for path in list(dir_of_metrics_dirs.iterdir()) + extra_metrics
+        if path.is_dir() and (path / "source").exists()
+        # path / source means it has been processed already
+    ]
+
+    from .analyze_trials3 import analyze_trials3
+    analyze_trials3(candidates, dir_of_metrics_dirs, chunk_size)
+
+@app.command()
+def just_read(
+    dir_of_metrics_dirs: Path,
+) -> None:
+    """Runs every analysis on every trial."""
+
+    import dask.multiprocessing
+
+    dask.config.set(
+        scheduler="processes"
+    )  # overwrite default with multiprocessing scheduler
+
+    import logging
+    memoize_logger = logging.getLogger("charmonium.cache.memoize")
+    memoize_logger.setLevel(logging.DEBUG)
+    fh = logging.FileHandler("memoize.log")
+    fh.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(message)s')
+    fh.setFormatter(formatter)
+    memoize_logger.addHandler(fh)
+
+    determ_hash_logger = logging.getLogger("charmonium.cache.determ_hash")
+    determ_hash_logger.setLevel(logging.DEBUG)
+    fh = logging.FileHandler("determ_hash.log")
+    fh.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(message)s')
+    fh.setFormatter(formatter)
+    determ_hash_logger.addHandler(fh)
+
+    candidates = [
+        path
+        for path in list(dir_of_metrics_dirs.iterdir())
+        if path.is_dir() and (path / "log").exists()
+    ]
+
+    from .analyze_trials import just_read
+    just_read(candidates)
 
 @app.command()
 def check(

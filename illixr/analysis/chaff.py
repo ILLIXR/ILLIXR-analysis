@@ -7,17 +7,16 @@ def plot_cc_stuff(trials: Trials) -> Mapping[str, Any]:
         ts = trial.output["path_times"][static_path]["times"]
         lat = trial.output["path_times"][static_path]["latency"]
         max_lat = max(np.percentile(lat, 99), max_lat)
-        datas[conditions2label(trial.config["conditions"])] = {
-            "ts": ts,
-            "lat": lat
-        }
+        datas[conditions2label(trial.config["conditions"])] = {"ts": ts, "lat": lat}
 
     for label, data in datas.items():
-        plt.rcParams.update({
-            "figure.figsize": [8, 6],
-            "grid.color": "#AAAAAA",
-            "figure.autolayout": True,
-	})
+        plt.rcParams.update(
+            {
+                "figure.figsize": [8, 6],
+                "grid.color": "#AAAAAA",
+                "figure.autolayout": True,
+            }
+        )
 
         fig, ax = plt.subplots()
         ax.set_title("Rotational MTP")
@@ -42,6 +41,7 @@ def plot_cc_stuff(trials: Trials) -> Mapping[str, Any]:
     fig.savefig("mtp.png")
     plt.close(fig)
     return {}
+
 
 def data_flow_bar_chart(static_path, dynamic_paths, latencies) -> None:
     rowNum = -1.5

@@ -6,58 +6,65 @@ This should not take into account ILLIXR-specific information.
 """
 
 import collections
-import random
-import contextlib
+import gc
+import warnings
 from enum import Enum
 from pathlib import Path
-import shutil
-from typing import (
-    Callable,
-    Dict,
-    Iterable,
-    Iterator,
-    List,
-    Mapping,
-    Any,
-    Optional,
-    Set,
-    Tuple,
-    TypeVar,
-    Union,
-)
-import warnings
-import itertools
-import io
-import gc
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Set, Tuple
 
 import anytree  # type: ignore
-import yaml
+import charmonium.time_block as ch_time_block
+import dask
+import dask.bag
 import networkx as nx  # type: ignore
 import numpy as np
-import pygraphviz  # type: ignore
 import pandas as pd  # type: ignore
+import pygraphviz  # type: ignore
+import yaml
+from charmonium.cache import Memoized, MemoizedGroup
+import charmonium.cache
 from frozendict import frozendict
-import charmonium.time_block as ch_time_block
-from charmonium.cache import memoize, MemoizedGroup, Memoized
-from tqdm import tqdm
-import dask.bag
-import dask
-import multiprocessing
 
-from .call_tree import DynamicFrame, StaticFrame, CallTree
-from .util import clip, timeseries, histogram, write_dir, dict_concat, right_pad, summary_stats, chunker, second, omit, undefault_dict, capture_file
+from .call_tree import CallTree, DynamicFrame, StaticFrame
+from .util import (
+    capture_file,
+    clip,
+    histogram,
+    right_pad,
+    second,
+    summary_stats,
+    timeseries,
+    undefault_dict,
+    write_dir,
+)
 
 use_parallel = True
+use_memoize = False
 
-group = MemoizedGroup(size="40GiB", fine_grain_persistence=True)
+memoize = charmonium.cache.memoize if use_memoize else (lambda **y: lambda x: x)
+Memoized = charmonium.cache.Memoized if use_memoize else (lambda func, **y: lambda *args, **kwargs: func(*args, **kwargs))
+delayed = dask.delayed if use_parallel else lambda x: x
+compute = dask.compute if use_parallel else lambda *args: args
 
-def conditions2label(conditions: Mapping[str, Any], rev: bool = False, cpu: bool = True) -> str:
-    return "".join([
-        conditions["scheduler"],
-        f"-{conditions['swap']}" if "swap" in conditions and conditions["scheduler"] == "dynamic" else "",
-        f" (rev {conditions['hash']:08x})" if rev else "",
-        f" {conditions['cpus']}x{conditions['cpu_freq']:.1f}GHz" if cpu else "",
-    ])
+
+group = MemoizedGroup(size="40GiB", fine_grain_persistence=True, log_size=None)
+
+
+def conditions2label(
+    conditions: Mapping[str, Any], rev: bool = False, cpu: bool = True
+) -> str:
+    return "".join(
+        [
+            conditions["scheduler"],
+            f"-{conditions['swap']}"
+            if "swap" in conditions and conditions["scheduler"] == "dynamic"
+            else "",
+            f" (rev {conditions['hash']:08x})" if rev else "",
+            f" {conditions['cpus']}x{conditions['cpu_freq']:.1f}GHz" if cpu else "",
+            # f"-tw_cushion={conditions['timewarp_cushion']}" if "timewarp_cushion" in conditions and conditions["scheduler"] == "dynamic" else "",
+        ]
+    )
+
 
 def dict_delayed(*keys):
     def decorator(func):
@@ -70,22 +77,30 @@ def dict_delayed(*keys):
                 return {keys[0]: delayed_key}
             else:
                 raise ValueError
+
         inner_func.__name__ = func.__name__
         return inner_func
+
     return decorator
 
-@memoize(verbose=False, group=group)
-def gen_static_to_dynamic(call_trees: Mapping[int, CallTree]) -> Mapping[StaticFrame, List[DynamicFrame]]:
-    static_to_dynamic: Mapping[StaticFrame, List[DynamicFrame]] = collections.defaultdict(list)
+
+@memoize(group=group)
+def gen_static_to_dynamic(
+    call_trees: Mapping[int, CallTree]
+) -> Mapping[StaticFrame, List[DynamicFrame]]:
+    static_to_dynamic: Mapping[
+        StaticFrame, List[DynamicFrame]
+    ] = collections.defaultdict(list)
     for tree in call_trees.values():
         for static_frame, dynamic_frames in tree.static_to_dynamic.items():
             static_to_dynamic[static_frame].extend(dynamic_frames)
     return dict(static_to_dynamic)
 
+
 def gen_callgraph_plot(
-        output_dir: Path,
-        call_trees: Mapping[int, CallTree],
-        static_to_dynamic: Mapping[StaticFrame, List[DynamicFrame]],
+    output_dir: Path,
+    call_trees: Mapping[int, CallTree],
+    static_to_dynamic: Mapping[StaticFrame, List[DynamicFrame]],
 ) -> None:
     """Generate a visualization of the callgraph."""
     total_time = sum([tree.root.cpu_time for tree in call_trees.values()])
@@ -95,7 +110,9 @@ def gen_callgraph_plot(
     graphviz = pygraphviz.AGraph(strict=True, directed=True)
 
     for static_frame, dynamic_frames in static_to_dynamic.items():
-        static_frame_time = sum(dynamic_frame.cpu_time for dynamic_frame in dynamic_frames)
+        static_frame_time = sum(
+            dynamic_frame.cpu_time for dynamic_frame in dynamic_frames
+        )
         node_weight = static_frame_time / total_time
         if True or static_frame.function_name not in {"get", "put"}:
             graphviz.add_node(
@@ -115,11 +132,12 @@ def gen_callgraph_plot(
     graphviz.write(dot_path)
     graphviz.draw(img_path, prog="dot")
 
+
 def gen_compute_times(
-        output_dir: Path,
-        call_trees: Mapping[int, CallTree],
-        static_to_dynamic: Mapping[StaticFrame, List[DynamicFrame]],
-        conditions: Mapping[str, Any],
+    output_dir: Path,
+    call_trees: Mapping[int, CallTree],
+    static_to_dynamic: Mapping[StaticFrame, List[DynamicFrame]],
+    conditions: Mapping[str, Any],
 ) -> Mapping[StaticFrame, Mapping[str, Any]]:
     top_level_fn_names = {
         "callback",
@@ -131,13 +149,22 @@ def gen_compute_times(
     compute_times = {}
     for tree in call_trees.values():
         for static_frame in anytree.PreOrderIter(tree.root.static_frame):
-            fn_name_good = static_frame.function_name in top_level_fn_names or static_frame.function_name.startswith("_")
+            fn_name_good = (
+                static_frame.function_name in top_level_fn_names
+                or static_frame.function_name.startswith("_")
+            )
             plugin_name_good = static_frame.plugin != "1"
             if fn_name_good and plugin_name_good:
                 dynamic_frames = tree.static_to_dynamic[static_frame]
-                cpu_times = np.array([dynamic_frame.cpu_time for dynamic_frame in dynamic_frames])
-                wall_times = np.array([dynamic_frame.wall_time for dynamic_frame in dynamic_frames])
-                ts = np.array([dynamic_frame.wall_start for dynamic_frame in dynamic_frames])
+                cpu_times = np.array(
+                    [dynamic_frame.cpu_time for dynamic_frame in dynamic_frames]
+                )
+                wall_times = np.array(
+                    [dynamic_frame.wall_time for dynamic_frame in dynamic_frames]
+                )
+                ts = np.array(
+                    [dynamic_frame.wall_start for dynamic_frame in dynamic_frames]
+                )
                 compute_times[static_frame] = {
                     "ts": ts,
                     "cpu_time": cpu_times,
@@ -146,65 +173,81 @@ def gen_compute_times(
                 }
     return compute_times
 
-@memoize(group=group, verbose=False)
+
+@memoize(group=group)
 def gen_compute_times_plot(
-        call_trees: Mapping[int, CallTree],
-        compute_times: Mapping[StaticFame, Mapping[str, Any]],
-        output_dir: Path,
+    call_trees: Mapping[int, CallTree],
+    compute_times: Mapping[StaticFame, Mapping[str, Any]],
+    output_dir: Path,
 ) -> Mapping[str, Any]:
     total_time = sum([tree.root.cpu_time for tree in call_trees.values()])
     cpu_timer_calls = sum([tree.calls for tree in call_trees.values()])
     cpu_timer_overhead = cpu_timer_calls * 400
-    def summarize_compute_times(frame_data: Tuple[StaticFrame, Mapping[str, Any]]) -> Tuple[str, str]:
+
+    def summarize_compute_times(
+        frame_data: Tuple[StaticFrame, Mapping[str, Any]]
+    ) -> Tuple[str, str]:
         frame, data = frame_data
         return (
             frame.plugin,
-            " ".join([
-                right_pad(frame.plugin_function(' '), 20),
-                "tid:",
-                right_pad(str(data["thread_id"]), 8),
-                "cpu_time:  ",
-                right_pad(summary_stats(data["cpu_time" ] / 1e6, digits=2), 95),
-                "wall_time: ",
-                right_pad(summary_stats(data["wall_time"] / 1e6, digits=2) , 95),
-            ]),
+            " ".join(
+                [
+                    right_pad(frame.plugin_function(" "), 20),
+                    "tid:",
+                    right_pad(str(data["thread_id"]), 8),
+                    "cpu_time:  ",
+                    right_pad(summary_stats(data["cpu_time"] / 1e6, digits=2), 95),
+                    "wall_time: ",
+                    right_pad(summary_stats(data["wall_time"] / 1e6, digits=2), 95),
+                ]
+            ),
         )
 
     compute_dir = output_dir / "compute_times"
-    write_dir({
-        output_dir / "compute_times": {
-            "summary.txt": "\n".join([
-                f"threads: {len(call_trees)}",
-                f"cpu overhead estimate: {cpu_timer_overhead / 1e6:.1f}ms, total_time: {total_time / 1e6:.1f}ms, percent error: {cpu_timer_overhead / total_time * 100 if total_time != 0 else 0:.1f}%",
-                *map(second, sorted(map(summarize_compute_times, compute_times.items()))),
-            ]),
-            **{
-                f"{frame.plugin_function(' ')}": {
-                    "hist.png": histogram(
-                        ys=data["cpu_time"] / 1e6,
-                        xlabel=f"CPU Time (ms)",
-                        title=f"Compute Time of {frame.plugin_function(' ')}"
-                    ),
-                    "ts.png": timeseries(
-                        ts=data["ts"],
-                        ys=data["cpu_time"] / 1e6,
-                        ylabel=f"CPU Time (ms)",
-                        title=f"Compute Time of {frame.plugin_function(' ')}"
-                    ),
-                }
-                for frame, data in compute_times.items()
+    write_dir(
+        {
+            output_dir
+            / "compute_times": {
+                "summary.txt": "\n".join(
+                    [
+                        f"threads: {len(call_trees)}",
+                        f"cpu overhead estimate: {cpu_timer_overhead / 1e6:.1f}ms, total_time: {total_time / 1e6:.1f}ms, percent error: {cpu_timer_overhead / total_time * 100 if total_time != 0 else 0:.1f}%",
+                        *map(
+                            second,
+                            sorted(map(summarize_compute_times, compute_times.items())),
+                        ),
+                    ]
+                ),
+                **{
+                    f"{frame.plugin_function(' ')}": {
+                        "hist.png": histogram(
+                            ys=data["cpu_time"] / 1e6,
+                            xlabel=f"CPU Time (ms)",
+                            title=f"Compute Time of {frame.plugin_function(' ')}",
+                        ),
+                        "ts.png": timeseries(
+                            ts=data["ts"],
+                            ys=data["cpu_time"] / 1e6,
+                            ylabel=f"CPU Time (ms)",
+                            title=f"Compute Time of {frame.plugin_function(' ')}",
+                        ),
+                    }
+                    for frame, data in compute_times.items()
+                },
             },
-        },
-    })
+        }
+    )
+
 
 class EdgeType(Enum):
     program = 1
     async_ = 2
     sync = 3
 
+
 @ch_time_block.decor()
 def gen_dynamic_dfg(
-        call_trees: Mapping[int, CallTree],
+    call_trees: Mapping[int, CallTree],
 ) -> Mapping[str, Any]:
     dynamic_dfg = nx.DiGraph()
 
@@ -212,7 +255,13 @@ def gen_dynamic_dfg(
     for tree in call_trees.values():
         last_comm: Optional[DynamicFrame] = None
         for frame in anytree.PreOrderIter(tree.root):
-            if frame.static_frame.function_name in {"put", "get", "callback", "entry", "exit"}:
+            if frame.static_frame.function_name in {
+                "put",
+                "get",
+                "callback",
+                "entry",
+                "exit",
+            }:
                 if last_comm is not None:
                     dynamic_dfg.add_edge(
                         last_comm, frame, topic_name=None, type=EdgeType.program
@@ -224,7 +273,10 @@ def gen_dynamic_dfg(
     # Maps a dataitem (topic_name, serial_no) to its put.
     for tree in call_trees.values():
         for frame in anytree.PreOrderIter(tree.root):
-            if frame.static_frame.function_name == "put" and frame.static_frame.topic_name != "1_completion":
+            if (
+                frame.static_frame.function_name == "put"
+                and frame.static_frame.topic_name != "1_completion"
+            ):
                 data_id = (frame.static_frame.topic_name, frame.serial_no)
                 assert data_id not in data_to_put, f"{data_id}"
                 data_to_put[data_id] = frame
@@ -263,14 +315,17 @@ def gen_dynamic_dfg(
                         put, frame, topic_name=topic_name, type=EdgeType.sync
                     )
                 else:
-                    warnings.warn(f"cb: {data_id} from {frame.static_frame.plugin} not found", UserWarning)
+                    warnings.warn(
+                        f"cb: {data_id} from {frame.static_frame.plugin} not found",
+                        UserWarning,
+                    )
 
     return dynamic_dfg
 
 
 def gen_static_dfg(
-        call_trees: Mapping[int, CallTree],
-        dynamic_dfg,
+    call_trees: Mapping[int, CallTree],
+    dynamic_dfg,
 ) -> Mapping[str, Any]:
     static_dfg = nx.DiGraph()
     for src, dst, edge_attrs in dynamic_dfg.edges(data=True):
@@ -281,10 +336,11 @@ def gen_static_dfg(
         )
     return static_dfg
 
+
 @ch_time_block.decor()
 def gen_dfg_plot(
-        static_dfg,
-        output_dir: Path,
+    static_dfg,
+    output_dir: Path,
 ) -> Mapping[str, Any]:
 
     plugin_to_nodes: Dict[str, List[StaticFrame]] = collections.defaultdict(list)
@@ -312,7 +368,6 @@ def gen_dfg_plot(
                 }[edge_attrs["type"]],
             )
             for node in [src, dst]:
-                # assert plugin
                 plugin_to_nodes[node.plugin].append(node)
                 static_dfg_graphviz.get_node(frame_to_id(node)).attr[
                     "label"
@@ -320,7 +375,7 @@ def gen_dfg_plot(
 
     # for plugin, nodes in plugin_to_nodes.items():
     #     static_dfg_graphviz.add_subgraph(map(frame_to_id, nodes), plugin, rank="same", rankdir="TB")
-        
+
     # for static, dynamic in path_static_to_dynamic.items():
     #     for src, dst in zip(static[:-1], static[1:]):
     #         static_dfg_graphviz.get_edge(frame_to_id(src), frame_to_id(dst),).attr[
@@ -340,11 +395,11 @@ def gen_dfg_plot(
     static_dfg_graphviz.draw(img_path, prog="dot")
 
 
-@memoize(group=group, verbose=False)
+@memoize(group=group)
 def gen_path_static_to_dynamic(
-        static_dfg,
-        dynamic_dfg,
-        static_to_dynamic,
+    static_dfg,
+    dynamic_dfg,
+    static_to_dynamic,
 ) -> Any:
     path_static_to_dynamic: Mapping[
         Tuple[StaticFrame, ...], List[Tuple[DynamicFrame, ...]]
@@ -378,15 +433,15 @@ def gen_path_static_to_dynamic(
                 )
 
     for static_dst in static_dfg:
-        assert static_dst in static_to_dynamic, f"{static_dst!s} from static_dfg is not found in static_to_dynamic"
+        assert (
+            static_dst in static_to_dynamic
+        ), f"{static_dst!s} from static_dfg is not found in static_to_dynamic"
         assert static_to_dynamic[static_dst]
         for dynamic_dst in static_to_dynamic[static_dst]:
-                for dynamic_path in explore(
-                    dynamic_dst, (), {dynamic_dst.static_frame}, 0
-                ):
-                    dynamic_path = dynamic_path[::-1]
-                    static_path = tuple(frame.static_frame for frame in dynamic_path)
-                    path_static_to_dynamic[static_path].append(dynamic_path)
+            for dynamic_path in explore(dynamic_dst, (), {dynamic_dst.static_frame}, 0):
+                dynamic_path = dynamic_path[::-1]
+                static_path = tuple(frame.static_frame for frame in dynamic_path)
+                path_static_to_dynamic[static_path].append(dynamic_path)
 
     def get_input_times(path: Iterable[DynamicFrame]) -> Iterable[int]:
         return (
@@ -415,53 +470,68 @@ def gen_path_static_to_dynamic(
     # TODO: compute how many puts are "used/ignored"
     return dict(path_static_to_dynamic_freshest)
 
-@memoize(verbose=False, group=group)
+
+@memoize(group=group)
 def all_dfg(call_trees, output_dir, static_to_dynamic) -> Mapping[str, Any]:
     dynamic_dfg = gen_dynamic_dfg(call_trees)
     static_dfg = gen_static_dfg(call_trees, dynamic_dfg)
     # gen_dfg_plot(static_dfg, output_dir)
-    path_static_to_dynamic = gen_path_static_to_dynamic(static_dfg, dynamic_dfg, static_to_dynamic)
+    path_static_to_dynamic = gen_path_static_to_dynamic(
+        static_dfg, dynamic_dfg, static_to_dynamic
+    )
     return path_static_to_dynamic
 
+
 important_path_signatures: Mapping[str, List[int]] = {
-    "CC":     (7,) * 2 +            (3,) * 3 +            (6,) * 4,
-    "Render": (7,) * 2 +            (3,) * 3 + (5,) * 2 + (6,) * 6,
-    "Cam":    (8,) * 2 + (2,) * 3 + (3,) * 2 +            (6,) * 4,
+    "CC": (7,) * 2 + (3,) * 3 + (6,) * 4,
+    "Render": (7,) * 2 + (3,) * 3 + (5,) * 2 + (6,) * 6,
+    "Cam": (8,) * 2 + (2,) * 3 + (3,) * 2 + (6,) * 4,
 }
 
+
 def gen_important_paths(
-        path_static_to_dynamic,
+    path_static_to_dynamic,
+    output_dir: Path,
 ) -> Any:
     def path_signature(path: Iterable[StaticFrame]) -> Tuple[int]:
         return tuple(int(frame.plugin) for frame in path)
 
-    def find_path(paths: Iterable[Tuple[StaticFrame, ...]], signature: Tuple[int, ...]) -> Tuple[StaticFrame, ...]:
+    def find_path(
+        paths: Iterable[Tuple[StaticFrame, ...]], signature: Tuple[int, ...]
+    ) -> Tuple[StaticFrame, ...]:
         for path in paths:
             if path_signature(path) == signature:
                 return path
-        print(f"{signature} is not found.")
-        for path in paths:
-            print(path_signature(path))
-        raise KeyError()
+        return None
+        warnings.warn(f"{signature} is not found in {output_dir!s}\n" + "\n".join(str(path_signatures(path)) for path in paths))
 
     return {
-        name: find_path(path_static_to_dynamic.keys(), path_signature)
-        for name, path_signature in important_path_signatures.items()
+        name: path
+        for name, path in {
+                name: find_path(path_static_to_dynamic.keys(), path_signature)
+                for name, path_signature in important_path_signatures.items()
+        }.items()
+        if path is not None
     }
 
+
 # TODO: Move the cutting to a later stage
-time_offset = 7
+time_offset = 15
+
 
 @ch_time_block.decor()
 def gen_path_metrics(
-        path_static_to_dynamic,
+    path_static_to_dynamic,
 ) -> Mapping[str, Any]:
     path_metrics = {}
     for static_path, dynamic_paths in path_static_to_dynamic.items():
-        data = np.array([
-            [node.wall_start for node in dynamic_path] + [dynamic_path[-1].wall_stop]
-            for dynamic_path in dynamic_paths
-        ])
+        data = np.array(
+            [
+                [node.wall_start for node in dynamic_path]
+                + [dynamic_path[-1].wall_stop]
+                for dynamic_path in dynamic_paths
+            ]
+        )
 
         assert (data[1:] - data[:-1] < 0).sum() < len(
             data
@@ -476,72 +546,99 @@ def gen_path_metrics(
         path_metrics[static_path] = {
             "times": data[frame_offset:],
             "rel_time": data[frame_offset:] - data[frame_offset:, 0][:, np.newaxis],
-            "latency": data[frame_offset:, -1] - data[frame_offset:, (1 if static_path[0].plugin == 8 else 0)] ,
-            "period": data[frame_offset+1:, -1] - data[frame_offset:-1, -1],
-            "rt": data[frame_offset+1:, -1] - data[frame_offset:-1, 0],
+            "latency": data[frame_offset:, -1]
+            - data[frame_offset:, (1 if static_path[0].plugin == 8 else 0)],
+            "period": data[frame_offset + 1 :, -1] - data[frame_offset:-1, -1],
+            "rt": data[frame_offset + 1 :, -1] - data[frame_offset:-1, 0],
         }
     return path_metrics
 
+
 path_metric_names = ["latency", "period", "rt"]
 
+
 @ch_time_block.decor()
-def gen_path_metrics_plot(path_static_to_dynamic, important_paths, path_metrics, output_dir):
+def gen_path_metrics_plot(
+    path_static_to_dynamic, important_paths, path_metrics, output_dir
+):
     def summarize(static_path: tuple[StaticFrame, ...]) -> str:
         dynamic_paths = path_static_to_dynamic[static_path]
         data = path_metrics[static_path]
+
         def link_str(i: int) -> str:
             frame_start = dynamic_paths[0][i].static_frame.plugin_function_topic("-")
-            frame_end = dynamic_paths[0][i+1].static_frame.plugin_function_topic("-")
+            frame_end = dynamic_paths[0][i + 1].static_frame.plugin_function_topic("-")
             label = f"{frame_start} -> {frame_end} (ms) "
             padding = max(0, 60 - len(label)) * " "
-            numbers = summary_stats((data["rel_time"][:, i+1] - data["rel_time"][:, i]) / 1e6)
+            numbers = summary_stats(
+                (data["rel_time"][:, i + 1] - data["rel_time"][:, i]) / 1e6
+            )
             return label + padding + numbers
-        return "\n".join([
-            f"{len(dynamic_paths)}" + " -> ".join(frame.plugin for frame in static_path),
-            "\n".join(link_str(i) for i in range(len(dynamic_paths[0]) - 1)),
-            "\n".join(f"{summary_stats(data[metric] / 1e6)}" for metric in path_metric_names),
-        ])
+
+        return "\n".join(
+            [
+                f"{len(dynamic_paths)} instances of "
+                + " -> ".join(frame.plugin for frame in static_path),
+                "\n".join(link_str(i) for i in range(len(dynamic_paths[0]) - 1)),
+                "\n".join(
+                    f"{summary_stats(data[metric] / 1e6)}"
+                    for metric in path_metric_names
+                ),
+            ]
+        )
 
     chains_dir = output_dir / "chains"
-    write_dir({
-        output_dir / "chains": {
-            f"summary.txt": "\n".join(
-                "\n".join([
-                    name,
-                    summarize(static_path),
-                    "",
-                ])
-                for name, static_path in important_paths.items()
-            ),
-            **{
-                path_name: {
-                    **{
-                        metric_name: {
-                            "hist.png": histogram(
-                                ys=path_metrics[path][metric_name] / 1e6,
-                                xlabel=f"{metric_name} (ms)",
-                                title=f"{metric_name.capitalize()} of {path_name}",
-                            ),
-                            "ts.png": timeseries(
-                                ts=path_metrics[path]["times"][:, 0],
-                                ys=path_metrics[path][metric_name] / 1e6,
-                                ylabel=f"{metric_name} (ms)",
-                                title=f"{metric_name.capitalize()} of {path_name}",
-                            ),
-                            "data.npy": capture_file(lambda file: np.savetxt(file, path_metrics[path][metric_name])),
-                        }
-                        for metric_name in path_metric_names
-                    },
-                    "times.npy": capture_file(lambda file: np.savetxt(file, path_metrics[path]["times"])),
-                }
-                for path_name, path in important_paths.items()
+    write_dir(
+        {
+            output_dir
+            / "chains": {
+                f"summary.txt": "\n".join(
+                    "\n".join(
+                        [
+                            name,
+                            summarize(static_path),
+                            "",
+                        ]
+                    )
+                    for name, static_path in important_paths.items()
+                ),
+                **{
+                    path_name: {
+                        **{
+                            metric_name: {
+                                "hist.png": histogram(
+                                    ys=path_metrics[path][metric_name] / 1e6,
+                                    xlabel=f"{metric_name} (ms)",
+                                    title=f"{metric_name.capitalize()} of {path_name}",
+                                ),
+                                "ts.png": timeseries(
+                                    ts=path_metrics[path]["times"][:, 0],
+                                    ys=path_metrics[path][metric_name] / 1e6,
+                                    ylabel=f"{metric_name} (ms)",
+                                    title=f"{metric_name.capitalize()} of {path_name}",
+                                ),
+                                "data.npy": capture_file(
+                                    lambda file: np.savetxt(
+                                        file, path_metrics[path][metric_name]
+                                    )
+                                ),
+                            }
+                            for metric_name in path_metric_names
+                        },
+                        "times.npy": capture_file(
+                            lambda file: np.savetxt(file, path_metrics[path]["times"])
+                        ),
+                    }
+                    for path_name, path in important_paths.items()
+                },
             },
-        },
-    })
+        }
+    )
+
 
 def gen_project_compute_times(
-        conditions: Mapping[str, Any],
-        compute_times: Mapping[str, Any],
+    conditions: Mapping[str, Any],
+    compute_times: Mapping[str, Any],
 ):
     return {
         frozendict(conditions): {
@@ -553,10 +650,11 @@ def gen_project_compute_times(
         },
     }
 
+
 def gen_project_path_metrics(
-        conditions: Mapping[str, Any],
-        important_paths: Mapping[str, Any],
-        path_metrics,
+    conditions: Mapping[str, Any],
+    important_paths: Mapping[str, Any],
+    path_metrics,
 ):
     return {
         frozendict(conditions): {
@@ -567,10 +665,12 @@ def gen_project_path_metrics(
             for path_name, path in important_paths.items()
         },
     }
+
+
 def gen_project_path_times(
-        conditions: Mapping[str, Any],
-        important_paths: Mapping[str, Any],
-        path_metrics,
+    conditions: Mapping[str, Any],
+    important_paths: Mapping[str, Any],
+    path_metrics,
 ):
     return {
         frozendict(conditions): {
@@ -579,39 +679,49 @@ def gen_project_path_times(
         },
     }
 
+
 def collect(trees: List[Optional[CallTree]]):
-    return {
-        int(tree.thread_id): tree
-        for tree in trees
-        if tree is not None
-    }
+    return {int(tree.thread_id): tree for tree in trees if tree is not None}
 
 
-def analyze_trial_delayed(metrics: Path, output_dir: Path) -> Mapping[str, dask.Delayed[Any]]:
-    delayed = dask.delayed if globals()["use_parallel"] else lambda x: x
+def analyze_trial_delayed(
+    metrics: Path, output_dir: Path
+) -> Mapping[str, dask.Delayed[Any]]:
 
     (output_dir / "source").write_text(str(metrics.resolve()))
 
     config = yaml.load((metrics / "config.yaml").read_text(), Loader=yaml.SafeLoader)
     conditions = config["conditions"]
 
-    call_trees = delayed(collect)([
-        delayed(Memoized(CallTree.from_database, verbose=False, group=group))(path)
-        for path in (metrics / "frames").iterdir()
-    ])
+    call_trees = delayed(collect)(
+        [
+            delayed(Memoized(CallTree.from_database, group=group))(path)
+            for path in (metrics / "frames").glob("*.sqlite")
+        ]
+    )
     static_to_dynamic = delayed(gen_static_to_dynamic)(call_trees)
-    compute_times = delayed(gen_compute_times)(output_dir, call_trees, static_to_dynamic, conditions)
+    compute_times = delayed(gen_compute_times)(
+        output_dir, call_trees, static_to_dynamic, conditions
+    )
     path_static_to_dynamic = delayed(all_dfg)(call_trees, output_dir, static_to_dynamic)
-    important_paths = delayed(gen_important_paths)(path_static_to_dynamic)
+    important_paths = delayed(gen_important_paths)(path_static_to_dynamic, output_dir)
     path_metrics = delayed(gen_path_metrics)(path_static_to_dynamic)
-    path_metrics_plot = delayed(gen_path_metrics_plot)(path_static_to_dynamic, important_paths, path_metrics, output_dir)
+    path_metrics_plot = delayed(gen_path_metrics_plot)(
+        path_static_to_dynamic, important_paths, path_metrics, output_dir
+    )
 
-    compute_times_plot = delayed(gen_compute_times_plot)(call_trees, compute_times, output_dir)
+    compute_times_plot = delayed(gen_compute_times_plot)(
+        call_trees, compute_times, output_dir
+    )
     # callgraph_plot = delayed(gen_callgraph_plot)(output_dir, call_trees, static_to_dynamic)
 
     proj_compute_times = delayed(gen_project_compute_times)(conditions, compute_times)
-    proj_path_metrics = delayed(gen_project_path_metrics)(conditions, important_paths, path_metrics)
-    proj_path_times = delayed(gen_project_path_times)(conditions, important_paths, path_metrics)
+    proj_path_metrics = delayed(gen_project_path_metrics)(
+        conditions, important_paths, path_metrics
+    )
+    proj_path_times = delayed(gen_project_path_times)(
+        conditions, important_paths, path_metrics
+    )
     return {
         "conditions": conditions,
         "path_metrics_plot": path_metrics_plot,
@@ -622,12 +732,19 @@ def analyze_trial_delayed(metrics: Path, output_dir: Path) -> Mapping[str, dask.
         "condition_trials": {frozendict(conditions): [output_dir]},
     }
 
+
 def combine(projected_trials: Iterable[Mapping[str, Any]]) -> Mapping[str, Any]:
     data = {
-        "proj_compute_times": collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(list))),
-        "proj_path_metrics": collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(list))),
-        "proj_path_times": collections.defaultdict(lambda: collections.defaultdict(list)),
-        "condition_trials": collections.defaultdict(list)
+        "proj_compute_times": collections.defaultdict(
+            lambda: collections.defaultdict(lambda: collections.defaultdict(list))
+        ),
+        "proj_path_metrics": collections.defaultdict(
+            lambda: collections.defaultdict(lambda: collections.defaultdict(list))
+        ),
+        "proj_path_times": collections.defaultdict(
+            lambda: collections.defaultdict(list)
+        ),
+        "condition_trials": collections.defaultdict(list),
     }
     for trial in projected_trials:
         for condition, equiv_trials in trial["condition_trials"].items():
@@ -646,13 +763,26 @@ def combine(projected_trials: Iterable[Mapping[str, Any]]) -> Mapping[str, Any]:
     # Undo the defaultdict
     return undefault_dict(data)
 
-@memoize(verbose=False, group=group)
+
+@memoize(group=group)
 def analyze_trials_projection(metrics_group: Path) -> Mapping[str, Any]:
-    0
-    compute = dask.compute if globals()["use_parallel"] else lambda *args: args
-    ret = combine(compute([
-        analyze_trial_delayed(metrics, metrics)
-        for metrics in metrics_group
-    ])[0])
+    ret = combine(
+        compute([analyze_trial_delayed(metrics, metrics) for metrics in metrics_group])[
+            0
+        ]
+    )
     gc.collect()
     return ret
+
+def just_read(metrics_dirs: Iterable[Path]) -> None:
+    Memoized = charmonium.cache.Memoized
+    delayed = lambda x: x
+    compute = lambda *args: args
+    
+    call_trees = [
+        [
+            Memoized(CallTree.from_database, group=group)(path)
+            for path in (metrics / "frames").iterdir()
+        ]
+        for metrics in metrics_dirs
+    ]

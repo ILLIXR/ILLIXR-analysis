@@ -6,43 +6,34 @@ Ideally, every ILLIXR-specific function calls ILLIXR-independent
 functions with ILLIXR-specific information."""
 
 import abc
-import itertools
-import subprocess
-from typing import Any, Callable, Iterable, List, Optional, TypeVar
 import collections
-import random
-import contextlib
-from enum import Enum
-from pathlib import Path
+import io
+import itertools
 import shutil
+import subprocess
+from pathlib import Path
 from typing import (
+    IO,
+    Any,
     Callable,
-    Dict,
     Iterable,
-    Iterator,
     List,
     Mapping,
-    Any,
     Optional,
     Set,
     Tuple,
     TypeVar,
-    Union,
-    IO,
 )
-import warnings
-import itertools
-import io
-import multiprocessing
 
 import anytree  # type: ignore
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import networkx as nx  # type: ignore
 import numpy as np
-import pygraphviz  # type: ignore
 import pandas as pd  # type: ignore
+import pygraphviz  # type: ignore
 from pandas.api.types import union_categoricals  # type: ignore
 from typing_extensions import Protocol
 
@@ -220,7 +211,10 @@ def set_index_with_uniquifier(
         .sort_index(inplace=False)
     )
 
-def summary_stats(data: np.array, digits: int = 1, percentiles: List[float] = [25, 75, 90, 95]) -> str:
+
+def summary_stats(
+    data: np.array, digits: int = 1, percentiles: List[float] = [25, 75, 90, 95]
+) -> str:
     percentiles_str = " " + " ".join(
         f"[{percentile}%]={np.percentile(data, percentile):,.{digits}f}"
         for percentile in percentiles
@@ -228,17 +222,18 @@ def summary_stats(data: np.array, digits: int = 1, percentiles: List[float] = [2
     with np.errstate(invalid="ignore"):
         return f"{data.mean():,.{digits}f} +/- {data.std():,.{digits}f} ({data.std() / data.mean() * 100:.0f}%) med={np.median(data):,.{digits}f} count={len(data)}{percentiles_str}"
 
+
 def right_pad(text: str, length: int) -> str:
     return text + " " * max(0, length - len(text))
 
+
 Key = TypeVar("Key")
 Val = TypeVar("Val")
+
+
 def dict_concat(dicts: Iterable[Mapping[Key, Val]]) -> Mapping[Key, Val]:
-    return {
-        key: val
-        for dict in dicts
-        for key, val in dict.items()
-    }
+    return {key: val for dict in dicts for key, val in dict.items()}
+
 
 def write_dir(content_map: Mapping[Path, Any]) -> None:
     for path, content in content_map.items():
@@ -260,21 +255,29 @@ def write_dir(content_map: Mapping[Path, Any]) -> None:
         else:
             raise TypeError(type(content))
 
+
 def histogram(
-        ys: np.array,
-        xlabel: str,
-        title: str,
-        bins: int = 50,
-        cloud: bool = True,
-        logy: bool = True,
-        grid: bool = False,
+    ys: np.array,
+    xlabel: str,
+    title: str,
+    bins: int = 50,
+    cloud: bool = True,
+    logy: bool = True,
+    grid: bool = False,
 ) -> bytes:
     fake_file = io.BytesIO()
     fig = plt.figure()
     ax = fig.add_subplot(1, 1, 1)
-    ax.hist(ys, bins=bins, align='mid')
+    ax.hist(ys, bins=bins, align="mid")
     if cloud:
-        ax.plot(ys, np.random.randn(*ys.shape) * (ax.get_ylim()[1] * 0.2) + (ax.get_ylim()[1] * 0.5) * np.ones(ys.shape), linestyle='', marker='.', ms=1)
+        ax.plot(
+            ys,
+            np.random.randn(*ys.shape) * (ax.get_ylim()[1] * 0.2)
+            + (ax.get_ylim()[1] * 0.5) * np.ones(ys.shape),
+            linestyle="",
+            marker=".",
+            ms=1,
+        )
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Occurrences (count)")
@@ -286,13 +289,14 @@ def histogram(
     plt.close(fig)
     return fake_file.getvalue()
 
+
 def timeseries(
-        ts: np.array,
-        ys: np.array,
-        title: str,
-        ylabel: str,
-        series_label: Optional[str] = None,
-        grid: bool = False,
+    ts: np.array,
+    ys: np.array,
+    title: str,
+    ylabel: str,
+    series_label: Optional[str] = None,
+    grid: bool = False,
 ) -> bytes:
     fake_file = io.BytesIO()
     fig = plt.figure()
@@ -310,18 +314,22 @@ def timeseries(
     plt.close(fig)
     return fake_file.getvalue()
 
+
 # TODO: replace with toolz
 A = TypeVar("A")
 B = TypeVar("B")
+
+
 def second(pair: Tuple[A, B]) -> B:
     return pair[1]
+
 
 T = TypeVar("T")
 
 
 def chunker(it: Iterable[T], size: int) -> Iterable[List[T]]:
     """chunk input into size or less chunks
-shamelessly swiped from Lib/multiprocessing.py:Pool._get_task"""
+    shamelessly swiped from Lib/multiprocessing.py:Pool._get_task"""
     it = iter(it)
     while True:
         x = list(itertools.islice(it, size))
@@ -329,10 +337,12 @@ shamelessly swiped from Lib/multiprocessing.py:Pool._get_task"""
             return
         yield x
 
+
 # import tracemalloc
 # tracemalloc.start(25)
 
 biggest_offenders = []
+
 
 def track_memory_usage():
     def decorator(function):
@@ -340,18 +350,22 @@ def track_memory_usage():
             snapshot1 = tracemalloc.take_snapshot()
             ret = function(*args, **kwargs)
             snapshot2 = tracemalloc.take_snapshot()
-            diffs = snapshot2.compare_to(snapshot1, 'lineno')
+            diffs = snapshot2.compare_to(snapshot1, "lineno")
             print(str(function))
             for stat in diffs[:10]:
                 print("%s memory blocks: %.1f KiB" % (stat.count, stat.size / 1024))
                 for line in stat.traceback.format():
                     print(line)
             return ret
+
         return inner_function
+
     return decorator
+
 
 def omit(dct: Mapping[Key, Val], keys: Set[Key]) -> Mapping[Key, Val]:
     return {key: val for key, val in dct.items() if key not in keys}
+
 
 def undefault_dict(dct):
     if isinstance(dct, (dict, collections.defaultdict)):
@@ -359,7 +373,8 @@ def undefault_dict(dct):
     else:
         return dct
 
-def capture_file(thunk: Callable[IO[bytes], None]) -> bytes:
+
+def capture_file(thunk: Callable[[IO[bytes]], None]) -> bytes:
     fake_file = io.BytesIO()
     thunk(fake_file)
     return fake_file.getvalue()

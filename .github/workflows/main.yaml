@@ -5,6 +5,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
+      - name: Install apt dependencies
+        run: |
+          sudo apt-get install -y graphviz graphviz-dev libcgraph6
+
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v2
         with:
@@ -36,4 +40,4 @@ jobs:
       - name: Run checks
         run: |
           cd "${GITHUB_WORKSPACE}"
-          poetry run typer illixr.analysis.main run check --no-modify
+          # poetry run typer illixr.analysis.main run check --no-modify

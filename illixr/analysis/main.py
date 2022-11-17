@@ -3,26 +3,58 @@
 This module should only call out to the highest-level of functions
 defined in other modules.  """
 
+import contextlib
 import shlex
 import subprocess
 import sys
 from pathlib import Path
+import shutil
 from typing import List, Union
 
+import dask.bag
 import typer
+import charmonium.time_block as ch_time_block
 
-from .analyze_trials import analyze_trials
-from .read_trials import read_trials
-from .util import command_exists
+from illixr.analysis.analyze_trials2 import analyze_trials
+from illixr.analysis.analyze_trials3 import analyze_trials3
+from illixr.analysis.util import command_exists
+import dask
+import webbrowser
 
 app = typer.Typer()
 
+import multiprocessing
+
 # See https://clig.dev/ for guidelines
 @app.command()
-def main(data_dir: Path) -> None:
+def main(
+    metrics_dir: Path,
+    chunk_size: int = typer.Option(10, "--chunk-size"),
+    verify: bool = typer.Option(
+        False, "--verify", help="Preform extra checks on the data"
+    ),
+    extra_metrics: List[Path] = typer.Option([], "--also"),
+) -> None:
     """Runs every analysis on every trial."""
-    trials = read_trials([data_dir])
-    analyze_trials(trials)
+
+    import dask.multiprocessing
+    dask.config.set(scheduler='processes')  # overwrite default with multiprocessing scheduler
+    # dask.config.set({"distributed.worker.daemon": False})
+    # client = dask.distributed.Client(
+    #     address=dask.distributed.LocalCluster(
+    #         n_workers=min(multiprocessing.cpu_count(), 20),
+    #     ),
+    # )
+    # print(client.dashboard_link)
+    # webbrowser.open(client.dashboard_link)
+    candidates = [
+        path
+        for path in list(metrics_dir.iterdir()) + extra_metrics
+        if path.is_dir() and (path / "log").exists()
+    ]
+    # trials = analyze_trials(candidates, metrics_dir, chunk_size)
+    analyze_trials3(candidates, metrics_dir, chunk_size)
+    # client.shutdown()
 
 
 @app.command()
